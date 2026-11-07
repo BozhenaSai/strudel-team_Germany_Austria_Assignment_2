@@ -1,0 +1,1 @@
+# strudel-team_Germany_Austria_Assignment_2
