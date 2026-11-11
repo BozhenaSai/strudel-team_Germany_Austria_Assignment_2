@@ -62,7 +62,7 @@ Both cities were run and the output matches the numbers below, which were calcul
 
 ## City C: Munich
 
-The first run used the pipeline exactly as tagged `v1-AB`, with the snapshot of 2026-09-23. All four tasks succeeded and the 8 checks passed.
+The first run used the pipeline as tagged `v1-AB` plus one fix made just before the run (see Pipeline fixes below), with the snapshot of 2026-09-23. All four tasks succeeded and the 8 checks passed.
 
 | | Munich | Berlin | Vienna |
 |---|---|---|---|
@@ -77,11 +77,11 @@ The first run used the pipeline exactly as tagged `v1-AB`, with the snapshot of 
 
 What was checked on the Munich output: broken characters in district and property type (none), room type labels (the same four as in the other cities), missing values (`neighbourhood_group` is empty for every Munich listing, as it is for Vienna, and gold does not use it), price outliers, the city centre, the feature distributions in gold and the row balance between the layers.
 
-**Pipeline fixes: none.** Nothing was found that the pipeline should have handled differently. The four price outliers (private rooms between 3,547 and 79,600 EUR) were flagged `extreme_high` by the relative rule and are not trainable, so the rule worked on a new city without any change.
+**Pipeline fixes: one, minor.** The notebooks `01_bronze` to `04_checks` still had a leftover test cell that reset the city to `vienna`. It was removed from all four before the run (commit `c08b6c5`), so the city comes only from the Job parameters. It changes no data and no rule. Apart from it, nothing was found that the pipeline should have handled differently. The four price outliers (private rooms between 3,547 and 79,600 EUR) were flagged `extreme_high` by the relative rule and are not trainable, so the rule worked on a new city without any change.
 
 **Model changes** are listed by the model owner in `model/README_model.md`. What is visible on the data side: Munich prices are much higher than in Berlin and Vienna, and the snapshot date falls in the Oktoberfest period, which may inflate prices (an assumption, not verified).
 
 ## Not covered
 
 - `calendar.csv.gz` and `reviews.csv.gz` are optional in the assignment and are not loaded.
-- The pipeline is not tuned for city C. The first run on Munich used the pipeline exactly as tagged `v1-AB`, and no pipeline change followed.
+- The pipeline is not tuned for city C. The first run on Munich used the pipeline as tagged `v1-AB` plus the one fix listed above.
