@@ -2,6 +2,8 @@
 
 One Databricks Job turns a raw `listings.csv.gz` into cleaned listings, model features and dashboard metrics. The city is a parameter. To add a city, upload its file to the Volume and run the Job with new parameters. No code is copied.
 
+Region: Germany and Austria, currency EUR. City A is Berlin, city B is Vienna, city C (new client) is Munich. The snapshot dates are in the Parameters table below.
+
 ## Layers
 
 The raw file is read from `/Volumes/workspace/airbnb/raw/<city>/listings.csv.gz`. Every table lives in the schema `workspace.airbnb`, and the layer is the table prefix.
@@ -20,7 +22,7 @@ All notebooks share `00_config`, which holds the paths, the parameters and the h
 | Parameter | Berlin (A) | Vienna (B) | Munich (C) |
 |---|---|---|---|
 | `city` | `berlin` | `vienna` | `munich` |
-| `snapshot_date` | `2026-09-19` | `2026-09-17` | date of the Munich snapshot |
+| `snapshot_date` | `2026-09-19` | `2026-09-17` | `2026-09-23` |
 | `currency` | `EUR` | `EUR` | `EUR` |
 
 The Job is defined in `job_definition.yml` and is called `airbnb_price_pipeline`. To run a city, open the Job and choose Run now with different settings. To run a single notebook by hand, set the same three values in its widgets.
@@ -58,7 +60,28 @@ Both cities were run and the output matches the numbers below, which were calcul
 | long-stay listings | 3,999 | 1,424 |
 | city centre (lat, lon) | 52.5096, 13.4084 | 48.2038, 16.3598 |
 
+## City C: Munich
+
+The first run used the pipeline exactly as tagged `v1-AB`, with the snapshot of 2026-09-23. All four tasks succeeded and the 8 checks passed.
+
+| | Munich | Berlin | Vienna |
+|---|---|---|---|
+| rows in bronze and in silver | 7,493 | 12,376 | 12,982 |
+| quarantined and duplicates | 0 and 0 | 0 and 0 | 0 and 0 |
+| `ok` (equals `is_trainable`) | 5,076 | 8,138 | 9,829 |
+| `no_price` | 2,413 | 4,219 | 3,113 |
+| `extreme_high` and `implausible_low` | 4 and 0 | 16 and 3 | 38 and 2 |
+| share of long-stay listings | 3.2 percent | 32.3 percent | 11.0 percent |
+| median price of priced listings (EUR) | 204 | 129.5 | 125.3 |
+| city centre (lat, lon) | 48.1368, 11.5638 | 52.5096, 13.4084 | 48.2038, 16.3598 |
+
+What was checked on the Munich output: broken characters in district and property type (none), room type labels (the same four as in the other cities), missing values (`neighbourhood_group` is empty for every Munich listing, as it is for Vienna, and gold does not use it), price outliers, the city centre, the feature distributions in gold and the row balance between the layers.
+
+**Pipeline fixes: none.** Nothing was found that the pipeline should have handled differently. The four price outliers (private rooms between 3,547 and 79,600 EUR) were flagged `extreme_high` by the relative rule and are not trainable, so the rule worked on a new city without any change.
+
+**Model changes** are listed by the model owner in `model/README_model.md`. What is visible on the data side: Munich prices are much higher than in Berlin and Vienna, and the snapshot date falls in the Oktoberfest period, which may inflate prices (an assumption, not verified).
+
 ## Not covered
 
 - `calendar.csv.gz` and `reviews.csv.gz` are optional in the assignment and are not loaded.
-- The pipeline is not tuned for city C. The first run on Munich uses the pipeline exactly as tagged `v1-AB`. Whatever breaks is documented and fixed afterwards as a pipeline fix.
+- The pipeline is not tuned for city C. The first run on Munich used the pipeline exactly as tagged `v1-AB`, and no pipeline change followed.
