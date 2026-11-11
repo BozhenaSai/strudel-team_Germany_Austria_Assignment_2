@@ -23,13 +23,6 @@
 
 # COMMAND ----------
 
-dbutils.widgets.removeAll()
-dbutils.widgets.text("city", "vienna")
-dbutils.widgets.text("snapshot_date", "2026-09-17")
-dbutils.widgets.text("currency", "EUR")
-
-# COMMAND ----------
-
 # MAGIC %run ./00_config
 
 # COMMAND ----------
