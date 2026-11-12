@@ -139,7 +139,9 @@
         "SELECT\n",
         "  model_version,\n",
         "  CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,\n",
-        "  CASE WHEN evaluated_on = 'test' THEN 'test set (training city)' ELSE 'new city (never seen)' END AS evaluated_on,\n",
+        "  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'\n",
+        "       WHEN model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "       ELSE 'held-out listings only' END AS evaluated_on,\n",
         "  segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur\n",
         "FROM workspace.airbnb.gold_model_metrics\n"
       ]
@@ -162,18 +164,13 @@
       "queryLines": [
         "WITH latest AS (\n",
         "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
-        "),\n",
-        "f AS (\n",
-        "  SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'\n",
-        "              WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on\n",
-        "  FROM workspace.airbnb.gold_listing_features f\n",
-        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
-        "  WHERE f.is_trainable\n",
         ")\n",
         "SELECT\n",
         "  p.model_version,\n",
         "  initcap(f.city)                                     AS city,\n",
-        "  f.evaluated_on,\n",
+        "  CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "              WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "              ELSE 'held-out listings only' END AS evaluated_on,\n",
         "  f.listing_id,\n",
         "  f.neighbourhood,\n",
         "  f.room_type,\n",
@@ -186,9 +183,10 @@
         "  round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
         "  CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
         "  concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
-        "FROM f\n",
+        "FROM workspace.airbnb.gold_listing_features f\n",
+        "JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "WHERE f.evaluated_on IS NOT NULL\n"
+        "WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n"
       ]
     },
     {
@@ -205,7 +203,7 @@
         "  FROM workspace.airbnb.gold_listing_features f\n",
         "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         ")\n",
         "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
         "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
@@ -228,7 +226,7 @@
         "  FROM workspace.airbnb.gold_listing_features f\n",
         "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         "),\n",
         "g AS (\n",
         "  SELECT model_version, city, neighbourhood, count(*) AS n_listings,\n",
@@ -254,18 +252,13 @@
         "WITH p AS (\n",
         "  WITH latest AS (\n",
         "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
-        "  ),\n",
-        "  f AS (\n",
-        "    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'\n",
-        "                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on\n",
-        "    FROM workspace.airbnb.gold_listing_features f\n",
-        "    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
-        "    WHERE f.is_trainable\n",
         "  )\n",
         "  SELECT\n",
         "    p.model_version,\n",
         "    initcap(f.city)                                     AS city,\n",
-        "    f.evaluated_on,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
         "    f.listing_id,\n",
         "    f.neighbourhood,\n",
         "    f.room_type,\n",
@@ -278,9 +271,10 @@
         "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
         "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
         "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
-        "  FROM f\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.evaluated_on IS NOT NULL\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         "),\n",
         "r AS (\n",
         "  SELECT p.*,\n",
@@ -291,6 +285,62 @@
         "SELECT model_version, city, direction, rnk, neighbourhood, room_type, accommodates, stay_type,\n",
         "       actual_price_eur, predicted_price_eur, error_eur, listing_url\n",
         "FROM r WHERE rnk <= 20\n"
+      ]
+    },
+    {
+      "name": "ds_munich_like_for_like",
+      "displayName": "ds_munich_like_for_like",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly\n",
+        "  SELECT f.listing_id, f.neighbourhood, f.price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred\n",
+        "  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id\n",
+        "  UNION ALL\n",
+        "  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur\n",
+        "  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id\n",
+        ")\n",
+        "SELECT predictor, count(*) AS n_listings,\n",
+        "       round(avg(abs(pred - price_eur)), 2) AS mae_eur,\n",
+        "       round(avg(pred - price_eur), 2)      AS bias_eur\n",
+        "FROM e GROUP BY predictor\n"
+      ]
+    },
+    {
+      "name": "ds_munich_neighbourhoods",
+      "displayName": "ds_munich_neighbourhoods",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly\n",
+        "  SELECT f.listing_id, f.neighbourhood, f.price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred\n",
+        "  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id\n",
+        "  UNION ALL\n",
+        "  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur\n",
+        "  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id\n",
+        ")\n",
+        "SELECT neighbourhood,\n",
+        "       count(DISTINCT listing_id)                                                        AS n_listings,\n",
+        "       round(percentile(price_eur, 0.5), 1)                                              AS median_price_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v1' THEN abs(pred - price_eur) END), 1)    AS mae_v1_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v2' THEN abs(pred - price_eur) END), 1)    AS mae_v2_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'baseline' THEN abs(pred - price_eur) END), 1)    AS mae_baseline_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v1' THEN pred - price_eur END), 1)         AS bias_v1_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v2' THEN pred - price_eur END), 1)         AS bias_v2_eur\n",
+        "FROM e GROUP BY neighbourhood\n",
+        "HAVING count(DISTINCT listing_id) >= 10\n"
       ]
     },
     {
@@ -417,7 +467,9 @@
         "SELECT\n",
         "  model_version,\n",
         "  CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,\n",
-        "  CASE WHEN evaluated_on = 'test' THEN 'test set (training city)' ELSE 'new city (never seen)' END AS evaluated_on,\n",
+        "  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'\n",
+        "       WHEN model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "       ELSE 'held-out listings only' END AS evaluated_on,\n",
         "  segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur\n",
         "FROM workspace.airbnb.gold_model_metrics\n",
         ") t\n",
@@ -439,7 +491,7 @@
         "  FROM workspace.airbnb.gold_listing_features f\n",
         "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         ")\n",
         "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
         "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
@@ -466,7 +518,7 @@
         "  FROM workspace.airbnb.gold_listing_features f\n",
         "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         ")\n",
         "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
         "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
@@ -492,7 +544,7 @@
         "  FROM workspace.airbnb.gold_listing_features f\n",
         "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         "),\n",
         "g AS (\n",
         "  SELECT model_version, city, neighbourhood, count(*) AS n_listings,\n",
@@ -521,18 +573,13 @@
         "WITH p AS (\n",
         "  WITH latest AS (\n",
         "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
-        "  ),\n",
-        "  f AS (\n",
-        "    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'\n",
-        "                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on\n",
-        "    FROM workspace.airbnb.gold_listing_features f\n",
-        "    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
-        "    WHERE f.is_trainable\n",
         "  )\n",
         "  SELECT\n",
         "    p.model_version,\n",
         "    initcap(f.city)                                     AS city,\n",
-        "    f.evaluated_on,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
         "    f.listing_id,\n",
         "    f.neighbourhood,\n",
         "    f.room_type,\n",
@@ -545,9 +592,10 @@
         "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
         "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
         "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
-        "  FROM f\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.evaluated_on IS NOT NULL\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         "),\n",
         "r AS (\n",
         "  SELECT p.*,\n",
@@ -570,18 +618,13 @@
         "WITH p AS (\n",
         "  WITH latest AS (\n",
         "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
-        "  ),\n",
-        "  f AS (\n",
-        "    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'\n",
-        "                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on\n",
-        "    FROM workspace.airbnb.gold_listing_features f\n",
-        "    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
-        "    WHERE f.is_trainable\n",
         "  )\n",
         "  SELECT\n",
         "    p.model_version,\n",
         "    initcap(f.city)                                     AS city,\n",
-        "    f.evaluated_on,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
         "    f.listing_id,\n",
         "    f.neighbourhood,\n",
         "    f.room_type,\n",
@@ -594,9 +637,10 @@
         "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
         "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
         "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
-        "  FROM f\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
         "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
-        "  WHERE f.evaluated_on IS NOT NULL\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
         "),\n",
         "r AS (\n",
         "  SELECT p.*,\n",
@@ -2072,9 +2116,9 @@
             "name": "text_17",
             "multilineTextboxSpec": {
               "lines": [
-                "# The model beats the baseline by 31 percent in Berlin and Vienna, but under-prices almost every Munich listing\n",
+                "# Trained only on Berlin and Vienna, the model beats the baseline by 31 percent there; in Munich v2 cuts the error from 157 to 115 EUR\n",
                 "\n",
-                "Berlin and Vienna: errors on the held-out test set. Munich: every priced listing, the model never saw this city. Error = predicted minus actual price; below zero means the model under-prices.\n"
+                "Both models are trained on Berlin and Vienna only. v1 is the model of the first run, v2 the model after the changes (no city and no raw coordinates, price relative to the city's median price). Berlin and Vienna: 20 % test listings. Munich: v1 on all 5,076 priced listings, v2 only on the 1,019 held-out listings. Error = predicted minus actual price; below zero means under-priced.\n"
               ]
             }
           },
@@ -2942,7 +2986,543 @@
         },
         {
           "widget": {
-            "name": "scatter_22",
+            "name": "text_22",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Munich: v1 against v2 on the same 1,019 held-out listings\n",
+                "\n",
+                "The Munich rows of the table above cover different listings for v1 and v2, so compare the versions here.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_23",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_like_for_like",
+                  "fields": [
+                    {
+                      "name": "predictor",
+                      "expression": "`predictor`"
+                    },
+                    {
+                      "name": "sum(mae_eur)",
+                      "expression": "SUM(`mae_eur`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "predictor",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "predictor"
+                },
+                "y": {
+                  "fieldName": "sum(mae_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "MAE, EUR"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Munich, same held-out listings: MAE, EUR"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_24",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_like_for_like",
+                  "fields": [
+                    {
+                      "name": "predictor",
+                      "expression": "`predictor`"
+                    },
+                    {
+                      "name": "n_listings",
+                      "expression": "`n_listings`"
+                    },
+                    {
+                      "name": "mae_eur",
+                      "expression": "`mae_eur`"
+                    },
+                    {
+                      "name": "bias_eur",
+                      "expression": "`bias_eur`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "predictor",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "predictor",
+                    "displayName": "predictor",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "n_listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "n_listings",
+                    "displayName": "n_listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "mae_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "mae_eur",
+                    "displayName": "mae_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "bias_eur",
+                    "displayName": "bias_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Munich, same held-out listings",
+                "showDescription": true,
+                "description": "bias below 0 = under-priced on average"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_25",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_neighbourhoods",
+                  "fields": [
+                    {
+                      "name": "neighbourhood",
+                      "expression": "`neighbourhood`"
+                    },
+                    {
+                      "name": "n_listings",
+                      "expression": "`n_listings`"
+                    },
+                    {
+                      "name": "median_price_eur",
+                      "expression": "`median_price_eur`"
+                    },
+                    {
+                      "name": "mae_v1_eur",
+                      "expression": "`mae_v1_eur`"
+                    },
+                    {
+                      "name": "mae_v2_eur",
+                      "expression": "`mae_v2_eur`"
+                    },
+                    {
+                      "name": "mae_baseline_eur",
+                      "expression": "`mae_baseline_eur`"
+                    },
+                    {
+                      "name": "bias_v1_eur",
+                      "expression": "`bias_v1_eur`"
+                    },
+                    {
+                      "name": "bias_v2_eur",
+                      "expression": "`bias_v2_eur`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "neighbourhood",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "neighbourhood",
+                    "displayName": "neighbourhood",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "n_listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "n_listings",
+                    "displayName": "n_listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "median_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "median_price_eur",
+                    "displayName": "median_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_v1_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "mae_v1_eur",
+                    "displayName": "mae_v1_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_v2_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "mae_v2_eur",
+                    "displayName": "mae_v2_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_baseline_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "mae_baseline_eur",
+                    "displayName": "mae_baseline_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_v1_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "bias_v1_eur",
+                    "displayName": "bias_v1_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_v2_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "bias_v2_eur",
+                    "displayName": "bias_v2_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Munich by neighbourhood (held-out listings, 10+ per district)",
+                "showDescription": true,
+                "description": "Sort by a column to see where each model errs most."
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "scatter_26",
             "queries": [
               {
                 "name": "main_query",
@@ -3002,14 +3582,14 @@
           },
           "position": {
             "x": 0,
-            "y": 7,
+            "y": 14,
             "width": 3,
             "height": 7
           }
         },
         {
           "widget": {
-            "name": "bar_23",
+            "name": "bar_27",
             "queries": [
               {
                 "name": "main_query",
@@ -3070,14 +3650,14 @@
           },
           "position": {
             "x": 3,
-            "y": 7,
+            "y": 14,
             "width": 3,
             "height": 7
           }
         },
         {
           "widget": {
-            "name": "bar_24",
+            "name": "bar_28",
             "queries": [
               {
                 "name": "main_query",
@@ -3138,14 +3718,14 @@
           },
           "position": {
             "x": 0,
-            "y": 14,
+            "y": 21,
             "width": 3,
             "height": 6
           }
         },
         {
           "widget": {
-            "name": "bar_25",
+            "name": "bar_29",
             "queries": [
               {
                 "name": "main_query",
@@ -3195,14 +3775,14 @@
           },
           "position": {
             "x": 3,
-            "y": 14,
+            "y": 21,
             "width": 3,
             "height": 6
           }
         },
         {
           "widget": {
-            "name": "table_26",
+            "name": "table_30",
             "queries": [
               {
                 "name": "main_query",
@@ -3548,14 +4128,14 @@
           },
           "position": {
             "x": 0,
-            "y": 20,
+            "y": 27,
             "width": 6,
             "height": 7
           }
         },
         {
           "widget": {
-            "name": "table_27",
+            "name": "table_31",
             "queries": [
               {
                 "name": "main_query",
@@ -3901,27 +4481,29 @@
           },
           "position": {
             "x": 0,
-            "y": 27,
+            "y": 34,
             "width": 6,
             "height": 7
           }
         },
         {
           "widget": {
-            "name": "text_28",
+            "name": "text_32",
             "multilineTextboxSpec": {
               "lines": [
-                "### Munich, first run (model v1, unchanged)\n",
+                "### Munich: what happened and what changed\n",
                 "\n",
-                "MAE 149.61 EUR against 40.39 EUR on the Berlin and Vienna test set; the baseline gets 163.24 EUR. Munich is much more expensive (median 204 EUR against about 127), every Munich longitude is outside the training range and the model has never seen `city = munich`, so it predicts Berlin and Vienna prices: the average error is about -143 EUR. Long stays transfer (MAE about 45 EUR), short stays do not (about 152 EUR), and only 3 percent of Munich listings are long stays. Switch the Model version filter to v2 to see the error after the model changes.\n"
+                "**First run (v1, unchanged).** MAE 149.61 EUR on all 5,076 priced listings against 40.39 EUR on the Berlin and Vienna test set; the baseline gets 163.24 EUR. Munich is much more expensive (median 204 EUR against about 127), the model had never seen `city = munich` and every Munich longitude is outside the training range, so it predicted Berlin and Vienna prices: bias about -143 EUR. Long stays transferred (MAE about 45 EUR), short stays did not (about 152 EUR).\n",
+                "\n",
+                "**After the changes (v2, still trained on Berlin and Vienna only).** Without city and raw coordinates, and with the price predicted relative to the city's median price. On the same 1,019 held-out Munich listings: baseline 171.31, v1 156.90, v2 115.36 EUR. The price level explains most of the gap. v2 costs 2.55 EUR in Berlin and Vienna (42.94 against 40.39 EUR).\n"
               ]
             }
           },
           "position": {
             "x": 0,
-            "y": 34,
+            "y": 41,
             "width": 6,
-            "height": 3
+            "height": 4
           }
         }
       ]

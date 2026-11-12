@@ -135,7 +135,9 @@ LATERAL VIEW stack(8,
 SELECT
   model_version,
   CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,
-  CASE WHEN evaluated_on = 'test' THEN 'test set (training city)' ELSE 'new city (never seen)' END AS evaluated_on,
+  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'
+       WHEN model_version = 'v1' THEN 'all priced listings (first run)'
+       ELSE 'held-out listings only' END AS evaluated_on,
   segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur
 FROM workspace.airbnb.gold_model_metrics;
 
@@ -152,22 +154,17 @@ WHERE segment = 'all';
 
 
 -- ====================================================================================================
--- ds_predictions   (One row per evaluated listing: Berlin/Vienna test rows, every trainable Munich row.)
+-- ds_predictions   (One row per evaluated listing and model version (see EVAL_ROWS).)
 -- ====================================================================================================
 WITH latest AS (
   SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
-),
-f AS (
-  SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'
-              WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on
-  FROM workspace.airbnb.gold_listing_features f
-  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
-  WHERE f.is_trainable
 )
 SELECT
   p.model_version,
   initcap(f.city)                                     AS city,
-  f.evaluated_on,
+  CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'
+              WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'
+              ELSE 'held-out listings only' END AS evaluated_on,
   f.listing_id,
   f.neighbourhood,
   f.room_type,
@@ -180,9 +177,10 @@ SELECT
   round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,
   CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,
   concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url
-FROM f
+FROM workspace.airbnb.gold_listing_features f
+JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
 JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-WHERE f.evaluated_on IS NOT NULL;
+WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'));
 
 
 -- ====================================================================================================
@@ -198,7 +196,7 @@ e AS (
   FROM workspace.airbnb.gold_listing_features f
   JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 )
 SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,
        count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur
@@ -220,7 +218,7 @@ e AS (
   FROM workspace.airbnb.gold_listing_features f
   JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 ),
 g AS (
   SELECT model_version, city, neighbourhood, count(*) AS n_listings,
@@ -245,18 +243,13 @@ FROM g
 WITH p AS (
   WITH latest AS (
     SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
-  ),
-  f AS (
-    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'
-                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on
-    FROM workspace.airbnb.gold_listing_features f
-    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
-    WHERE f.is_trainable
   )
   SELECT
     p.model_version,
     initcap(f.city)                                     AS city,
-    f.evaluated_on,
+    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'
+                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'
+                ELSE 'held-out listings only' END AS evaluated_on,
     f.listing_id,
     f.neighbourhood,
     f.room_type,
@@ -269,9 +262,10 @@ WITH p AS (
     round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,
     CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,
     concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url
-  FROM f
+  FROM workspace.airbnb.gold_listing_features f
+  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.evaluated_on IS NOT NULL
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 ),
 r AS (
   SELECT p.*,
@@ -282,6 +276,60 @@ r AS (
 SELECT model_version, city, direction, rnk, neighbourhood, room_type, accommodates, stay_type,
        actual_price_eur, predicted_price_eur, error_eur, listing_url
 FROM r WHERE rnk <= 20;
+
+
+-- ====================================================================================================
+-- ds_munich_like_for_like   (Munich, the same held-out listings (is_test): baseline, v1 and v2 side by side.)
+-- ====================================================================================================
+WITH latest AS (
+  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
+),
+m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly
+  SELECT f.listing_id, f.neighbourhood, f.price_eur
+  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
+  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test
+),
+e AS (
+  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred
+  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id
+  UNION ALL
+  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur
+  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id
+)
+SELECT predictor, count(*) AS n_listings,
+       round(avg(abs(pred - price_eur)), 2) AS mae_eur,
+       round(avg(pred - price_eur), 2)      AS bias_eur
+FROM e GROUP BY predictor;
+
+
+-- ====================================================================================================
+-- ds_munich_neighbourhoods   (Munich by neighbourhood on the held-out listings: error of baseline, v1 and v2 (10+ listings).)
+-- ====================================================================================================
+WITH latest AS (
+  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
+),
+m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly
+  SELECT f.listing_id, f.neighbourhood, f.price_eur
+  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
+  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test
+),
+e AS (
+  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred
+  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id
+  UNION ALL
+  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur
+  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id
+)
+SELECT neighbourhood,
+       count(DISTINCT listing_id)                                                        AS n_listings,
+       round(percentile(price_eur, 0.5), 1)                                              AS median_price_eur,
+       round(avg(CASE WHEN predictor = 'model v1' THEN abs(pred - price_eur) END), 1)    AS mae_v1_eur,
+       round(avg(CASE WHEN predictor = 'model v2' THEN abs(pred - price_eur) END), 1)    AS mae_v2_eur,
+       round(avg(CASE WHEN predictor = 'baseline' THEN abs(pred - price_eur) END), 1)    AS mae_baseline_eur,
+       round(avg(CASE WHEN predictor = 'model v1' THEN pred - price_eur END), 1)         AS bias_v1_eur,
+       round(avg(CASE WHEN predictor = 'model v2' THEN pred - price_eur END), 1)         AS bias_v2_eur
+FROM e GROUP BY neighbourhood
+HAVING count(DISTINCT listing_id) >= 10;
 
 
 -- ====================================================================================================
@@ -402,7 +450,9 @@ SELECT * FROM (
 SELECT
   model_version,
   CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,
-  CASE WHEN evaluated_on = 'test' THEN 'test set (training city)' ELSE 'new city (never seen)' END AS evaluated_on,
+  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'
+       WHEN model_version = 'v1' THEN 'all priced listings (first run)'
+       ELSE 'held-out listings only' END AS evaluated_on,
   segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur
 FROM workspace.airbnb.gold_model_metrics
 ) t
@@ -423,7 +473,7 @@ e AS (
   FROM workspace.airbnb.gold_listing_features f
   JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 )
 SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,
        count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur
@@ -449,7 +499,7 @@ e AS (
   FROM workspace.airbnb.gold_listing_features f
   JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 )
 SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,
        count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur
@@ -474,7 +524,7 @@ e AS (
   FROM workspace.airbnb.gold_listing_features f
   JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.is_trainable AND (f.city NOT IN ('berlin', 'vienna') OR f.is_test)
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 ),
 g AS (
   SELECT model_version, city, neighbourhood, count(*) AS n_listings,
@@ -502,18 +552,13 @@ SELECT * FROM (
 WITH p AS (
   WITH latest AS (
     SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
-  ),
-  f AS (
-    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'
-                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on
-    FROM workspace.airbnb.gold_listing_features f
-    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
-    WHERE f.is_trainable
   )
   SELECT
     p.model_version,
     initcap(f.city)                                     AS city,
-    f.evaluated_on,
+    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'
+                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'
+                ELSE 'held-out listings only' END AS evaluated_on,
     f.listing_id,
     f.neighbourhood,
     f.room_type,
@@ -526,9 +571,10 @@ WITH p AS (
     round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,
     CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,
     concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url
-  FROM f
+  FROM workspace.airbnb.gold_listing_features f
+  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.evaluated_on IS NOT NULL
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 ),
 r AS (
   SELECT p.*,
@@ -550,18 +596,13 @@ SELECT * FROM (
 WITH p AS (
   WITH latest AS (
     SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city
-  ),
-  f AS (
-    SELECT f.*, CASE WHEN f.city IN ('berlin', 'vienna') AND f.is_test THEN 'test set (training city)'
-                WHEN f.city NOT IN ('berlin', 'vienna')          THEN 'new city (never seen)' END AS evaluated_on
-    FROM workspace.airbnb.gold_listing_features f
-    JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
-    WHERE f.is_trainable
   )
   SELECT
     p.model_version,
     initcap(f.city)                                     AS city,
-    f.evaluated_on,
+    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'
+                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'
+                ELSE 'held-out listings only' END AS evaluated_on,
     f.listing_id,
     f.neighbourhood,
     f.room_type,
@@ -574,9 +615,10 @@ WITH p AS (
     round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,
     CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,
     concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url
-  FROM f
+  FROM workspace.airbnb.gold_listing_features f
+  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date
   JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id
-  WHERE f.evaluated_on IS NOT NULL
+  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))
 ),
 r AS (
   SELECT p.*,
