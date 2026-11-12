@@ -1,0 +1,4517 @@
+{
+  "datasets": [
+    {
+      "name": "ds_city_overview",
+      "displayName": "ds_city_overview",
+      "queryLines": [
+        "SELECT\n",
+        "  initcap(m.city)                                   AS city,\n",
+        "  m.snapshot_date,\n",
+        "  m.listings,\n",
+        "  m.listings_with_price,\n",
+        "  round(m.median_price_eur, 1)                      AS median_price_eur,\n",
+        "  round(m.median_availability_365, 0)               AS median_availability_365,\n",
+        "  round(m.avg_review_rating, 2)                     AS avg_review_rating,\n",
+        "  m.hosts,\n",
+        "  round(m.listings / m.hosts, 2)                    AS listings_per_host,\n",
+        "  round(100 * m.share_long_stay, 1)                 AS pct_long_stay,\n",
+        "  round(100 * m.share_superhost, 1)                 AS pct_superhost,\n",
+        "  round(100 * (1 - m.listings_with_price / m.listings), 1) AS pct_without_price\n",
+        "FROM workspace.airbnb.gold_city_metrics m\n",
+        "WHERE m.room_type = 'All' AND m.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_city_metrics x WHERE x.city = m.city)\n"
+      ]
+    },
+    {
+      "name": "ds_room_mix",
+      "displayName": "ds_room_mix",
+      "queryLines": [
+        "SELECT\n",
+        "  initcap(m.city)                      AS city,\n",
+        "  m.room_type,\n",
+        "  m.listings,\n",
+        "  round(100 * m.share_of_listings, 1)  AS pct_of_city_listings,\n",
+        "  round(m.median_price_eur, 1)         AS median_price_eur,\n",
+        "  CASE WHEN m.city IN ('berlin', 'vienna') THEN '1' ELSE '0' END AS is_ab\n",
+        "FROM workspace.airbnb.gold_city_metrics m\n",
+        "WHERE m.room_type <> 'All' AND m.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_city_metrics x WHERE x.city = m.city)\n"
+      ]
+    },
+    {
+      "name": "ds_price_bins",
+      "displayName": "ds_price_bins",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "b AS (\n",
+        "  SELECT f.city, least(floor(f.price_eur / 25) * 25, 500) AS band_start\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.is_trainable\n",
+        ")\n",
+        "SELECT initcap(city) AS city,\n",
+        "       CASE WHEN band_start >= 500 THEN '500+' ELSE concat(lpad(cast(cast(band_start AS INT) AS STRING), 3, '0'), '-', cast(cast(band_start + 25 AS INT) AS STRING)) END AS price_band_eur,\n",
+        "       count(*) AS listings,\n",
+        "       round(100 * count(*) / sum(count(*)) OVER (PARTITION BY city), 2) AS pct_of_city\n",
+        "FROM b GROUP BY city, band_start\n"
+      ]
+    },
+    {
+      "name": "ds_availability_bins",
+      "displayName": "ds_availability_bins",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "b AS (\n",
+        "  SELECT f.city, least(floor(f.availability_365 / 30) * 30, 360) AS band_start\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.availability_365 IS NOT NULL\n",
+        ")\n",
+        "SELECT initcap(city) AS city,\n",
+        "       concat(lpad(cast(cast(band_start AS INT) AS STRING), 3, '0'), '-', cast(cast(least(band_start + 29, 365) AS INT) AS STRING)) AS days_available,\n",
+        "       count(*) AS listings,\n",
+        "       round(100 * count(*) / sum(count(*)) OVER (PARTITION BY city), 2) AS pct_of_city\n",
+        "FROM b GROUP BY city, band_start\n"
+      ]
+    },
+    {
+      "name": "ds_neighbourhoods_top",
+      "displayName": "ds_neighbourhoods_top",
+      "queryLines": [
+        "WITH n AS (\n",
+        "  SELECT n.*,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.median_price_eur DESC) AS price_rank,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.listings DESC)         AS size_rank\n",
+        "  FROM workspace.airbnb.gold_neighbourhood_metrics n\n",
+        "  WHERE n.listings_with_price >= 20\n",
+        "    AND n.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_neighbourhood_metrics x WHERE x.city = n.city)\n",
+        ")\n",
+        "SELECT initcap(city) AS city, neighbourhood, listings, round(median_price_eur, 1) AS median_price_eur,\n",
+        "       price_rank, size_rank,\n",
+        "       CASE WHEN price_rank <= 10 THEN '1' ELSE '0' END AS price_rank_ok,\n",
+        "       CASE WHEN size_rank <= 10 THEN '1' ELSE '0' END AS size_rank_ok,\n",
+        "       concat(initcap(city), ': ', neighbourhood) AS city_neighbourhood\n",
+        "FROM n WHERE price_rank <= 10 OR size_rank <= 10\n"
+      ]
+    },
+    {
+      "name": "ds_compare_ab",
+      "displayName": "ds_compare_ab",
+      "queryLines": [
+        "WITH c AS (\n",
+        "  SELECT m.city, CAST(m.listings AS DOUBLE) AS listings,\n",
+        "         m.median_price_eur, m.median_availability_365, m.avg_review_rating,\n",
+        "         m.listings / m.hosts AS listings_per_host, m.share_long_stay, m.share_superhost,\n",
+        "         1 - m.listings_with_price / m.listings AS share_without_price\n",
+        "  FROM workspace.airbnb.gold_city_metrics m\n",
+        "  WHERE m.room_type = 'All' AND m.city IN ('berlin', 'vienna') AND m.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_city_metrics x WHERE x.city = m.city)\n",
+        "),\n",
+        "p AS (\n",
+        "  SELECT\n",
+        "    max(CASE WHEN city = 'berlin' THEN listings END) AS b_listings, max(CASE WHEN city = 'vienna' THEN listings END) AS v_listings,\n",
+        "    max(CASE WHEN city = 'berlin' THEN median_price_eur END) AS b_price, max(CASE WHEN city = 'vienna' THEN median_price_eur END) AS v_price,\n",
+        "    max(CASE WHEN city = 'berlin' THEN median_availability_365 END) AS b_avail, max(CASE WHEN city = 'vienna' THEN median_availability_365 END) AS v_avail,\n",
+        "    max(CASE WHEN city = 'berlin' THEN avg_review_rating END) AS b_rating, max(CASE WHEN city = 'vienna' THEN avg_review_rating END) AS v_rating,\n",
+        "    max(CASE WHEN city = 'berlin' THEN listings_per_host END) AS b_lph, max(CASE WHEN city = 'vienna' THEN listings_per_host END) AS v_lph,\n",
+        "    max(CASE WHEN city = 'berlin' THEN share_long_stay END) AS b_long, max(CASE WHEN city = 'vienna' THEN share_long_stay END) AS v_long,\n",
+        "    max(CASE WHEN city = 'berlin' THEN share_superhost END) AS b_super, max(CASE WHEN city = 'vienna' THEN share_superhost END) AS v_super,\n",
+        "    max(CASE WHEN city = 'berlin' THEN share_without_price END) AS b_noprice, max(CASE WHEN city = 'vienna' THEN share_without_price END) AS v_noprice\n",
+        "  FROM c\n",
+        ")\n",
+        "SELECT metric, round(berlin, 2) AS berlin, round(vienna, 2) AS vienna, round(vienna - berlin, 2) AS vienna_minus_berlin\n",
+        "FROM p\n",
+        "LATERAL VIEW stack(8,\n",
+        "  '1 Listings', b_listings, v_listings,\n",
+        "  '2 Median price (EUR)', b_price, v_price,\n",
+        "  '3 Median availability (days/year)', b_avail, v_avail,\n",
+        "  '4 Avg review score (0-5)', b_rating, v_rating,\n",
+        "  '5 Listings per host', b_lph, v_lph,\n",
+        "  '6 Long-stay listings (%)', 100 * b_long, 100 * v_long,\n",
+        "  '7 Superhosts (%)', 100 * b_super, 100 * v_super,\n",
+        "  '8 Listings without price (%)', 100 * b_noprice, 100 * v_noprice\n",
+        ") s AS metric, berlin, vienna\n"
+      ]
+    },
+    {
+      "name": "ds_model_metrics",
+      "displayName": "ds_model_metrics",
+      "queryLines": [
+        "SELECT\n",
+        "  model_version,\n",
+        "  CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,\n",
+        "  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'\n",
+        "       WHEN model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "       ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "  segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur\n",
+        "FROM workspace.airbnb.gold_model_metrics\n"
+      ]
+    },
+    {
+      "name": "ds_model_mae_long",
+      "displayName": "ds_model_mae_long",
+      "queryLines": [
+        "SELECT model_version,\n",
+        "       CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,\n",
+        "       predictor, mae_eur\n",
+        "FROM workspace.airbnb.gold_model_metrics\n",
+        "LATERAL VIEW stack(2, 'baseline', mae_baseline_eur, 'model', mae_model_eur) s AS predictor, mae_eur\n",
+        "WHERE segment = 'all'\n"
+      ]
+    },
+    {
+      "name": "ds_predictions",
+      "displayName": "ds_predictions",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        ")\n",
+        "SELECT\n",
+        "  p.model_version,\n",
+        "  initcap(f.city)                                     AS city,\n",
+        "  CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "              WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "              ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "  f.listing_id,\n",
+        "  f.neighbourhood,\n",
+        "  f.room_type,\n",
+        "  f.accommodates,\n",
+        "  CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "  round(f.dist_to_centre_km, 2)                       AS dist_to_centre_km,\n",
+        "  f.price_eur                                         AS actual_price_eur,\n",
+        "  p.predicted_price_eur,\n",
+        "  round(p.predicted_price_eur - f.price_eur, 2)       AS error_eur,\n",
+        "  round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
+        "  CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
+        "  concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
+        "FROM workspace.airbnb.gold_listing_features f\n",
+        "JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n"
+      ]
+    },
+    {
+      "name": "ds_error_segments",
+      "displayName": "ds_error_segments",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT p.model_version, f.city, f.room_type,\n",
+        "         CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "         p.predicted_price_eur - f.price_eur AS err\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        ")\n",
+        "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
+        "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n",
+        "UNION ALL\n",
+        "SELECT model_version, initcap(city), 'stay type', stay_type, count(*), round(avg(abs(err)), 2), round(avg(err), 2)\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n"
+      ]
+    },
+    {
+      "name": "ds_error_by_neighbourhood",
+      "displayName": "ds_error_by_neighbourhood",
+      "queryLines": [
+        "SELECT *, CASE WHEN under_rank <= 10 THEN '1' ELSE '0' END AS top10 FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT p.model_version, f.city, f.neighbourhood, f.price_eur, p.predicted_price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        "),\n",
+        "g AS (\n",
+        "  SELECT model_version, city, neighbourhood, count(*) AS n_listings,\n",
+        "         round(percentile(price_eur, 0.5), 1) AS median_actual_eur,\n",
+        "         round(percentile(predicted_price_eur, 0.5), 1) AS median_predicted_eur,\n",
+        "         round(avg(abs(predicted_price_eur - price_eur)), 2) AS mae_eur,\n",
+        "         round(avg(predicted_price_eur - price_eur), 2) AS bias_eur\n",
+        "  FROM e GROUP BY model_version, city, neighbourhood\n",
+        "  HAVING count(*) >= 10\n",
+        ")\n",
+        "SELECT model_version, initcap(city) AS city, neighbourhood,\n",
+        "       concat(initcap(city), ': ', neighbourhood) AS city_neighbourhood,\n",
+        "       n_listings, median_actual_eur, median_predicted_eur, mae_eur, bias_eur,\n",
+        "       row_number() OVER (PARTITION BY model_version, city ORDER BY bias_eur ASC) AS under_rank\n",
+        "FROM g\n",
+        ") t\n"
+      ]
+    },
+    {
+      "name": "ds_extreme_errors",
+      "displayName": "ds_extreme_errors",
+      "queryLines": [
+        "WITH p AS (\n",
+        "  WITH latest AS (\n",
+        "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "  )\n",
+        "  SELECT\n",
+        "    p.model_version,\n",
+        "    initcap(f.city)                                     AS city,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "    f.listing_id,\n",
+        "    f.neighbourhood,\n",
+        "    f.room_type,\n",
+        "    f.accommodates,\n",
+        "    CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "    round(f.dist_to_centre_km, 2)                       AS dist_to_centre_km,\n",
+        "    f.price_eur                                         AS actual_price_eur,\n",
+        "    p.predicted_price_eur,\n",
+        "    round(p.predicted_price_eur - f.price_eur, 2)       AS error_eur,\n",
+        "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
+        "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
+        "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        "),\n",
+        "r AS (\n",
+        "  SELECT p.*,\n",
+        "         row_number() OVER (PARTITION BY model_version, city, direction\n",
+        "                            ORDER BY CASE WHEN direction = 'under-priced' THEN error_eur ELSE -error_eur END) AS rnk\n",
+        "  FROM p\n",
+        ")\n",
+        "SELECT model_version, city, direction, rnk, neighbourhood, room_type, accommodates, stay_type,\n",
+        "       actual_price_eur, predicted_price_eur, error_eur, listing_url\n",
+        "FROM r WHERE rnk <= 20\n"
+      ]
+    },
+    {
+      "name": "ds_munich_like_for_like",
+      "displayName": "ds_munich_like_for_like",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly\n",
+        "  SELECT f.listing_id, f.neighbourhood, f.price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred\n",
+        "  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id\n",
+        "  UNION ALL\n",
+        "  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur\n",
+        "  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id\n",
+        ")\n",
+        "SELECT predictor, count(*) AS n_listings,\n",
+        "       round(avg(abs(pred - price_eur)), 2) AS mae_eur,\n",
+        "       round(avg(pred - price_eur), 2)      AS bias_eur\n",
+        "FROM e GROUP BY predictor\n"
+      ]
+    },
+    {
+      "name": "ds_munich_neighbourhoods",
+      "displayName": "ds_munich_neighbourhoods",
+      "queryLines": [
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "m AS (   -- Munich held-out listings: the only rows on which v1, v2 and the baseline can be compared fairly\n",
+        "  SELECT f.listing_id, f.neighbourhood, f.price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  WHERE f.city = 'munich' AND f.is_trainable AND f.is_test\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT 'baseline' AS predictor, m.listing_id, m.neighbourhood, m.price_eur, b.baseline_price_eur AS pred\n",
+        "  FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id\n",
+        "  UNION ALL\n",
+        "  SELECT concat('model ', p.model_version), m.listing_id, m.neighbourhood, m.price_eur, p.predicted_price_eur\n",
+        "  FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id\n",
+        ")\n",
+        "SELECT neighbourhood,\n",
+        "       count(DISTINCT listing_id)                                                        AS n_listings,\n",
+        "       round(percentile(price_eur, 0.5), 1)                                              AS median_price_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v1' THEN abs(pred - price_eur) END), 1)    AS mae_v1_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v2' THEN abs(pred - price_eur) END), 1)    AS mae_v2_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'baseline' THEN abs(pred - price_eur) END), 1)    AS mae_baseline_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v1' THEN pred - price_eur END), 1)         AS bias_v1_eur,\n",
+        "       round(avg(CASE WHEN predictor = 'model v2' THEN pred - price_eur END), 1)         AS bias_v2_eur\n",
+        "FROM e GROUP BY neighbourhood\n",
+        "HAVING count(DISTINCT listing_id) >= 10\n"
+      ]
+    },
+    {
+      "name": "ds_neighbourhoods_top__price_rank_ok_1",
+      "displayName": "ds_neighbourhoods_top__price_rank_ok_1",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH n AS (\n",
+        "  SELECT n.*,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.median_price_eur DESC) AS price_rank,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.listings DESC)         AS size_rank\n",
+        "  FROM workspace.airbnb.gold_neighbourhood_metrics n\n",
+        "  WHERE n.listings_with_price >= 20\n",
+        "    AND n.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_neighbourhood_metrics x WHERE x.city = n.city)\n",
+        ")\n",
+        "SELECT initcap(city) AS city, neighbourhood, listings, round(median_price_eur, 1) AS median_price_eur,\n",
+        "       price_rank, size_rank,\n",
+        "       CASE WHEN price_rank <= 10 THEN '1' ELSE '0' END AS price_rank_ok,\n",
+        "       CASE WHEN size_rank <= 10 THEN '1' ELSE '0' END AS size_rank_ok,\n",
+        "       concat(initcap(city), ': ', neighbourhood) AS city_neighbourhood\n",
+        "FROM n WHERE price_rank <= 10 OR size_rank <= 10\n",
+        ") t\n",
+        "WHERE price_rank_ok = '1'\n"
+      ]
+    },
+    {
+      "name": "ds_neighbourhoods_top__size_rank_ok_1",
+      "displayName": "ds_neighbourhoods_top__size_rank_ok_1",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH n AS (\n",
+        "  SELECT n.*,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.median_price_eur DESC) AS price_rank,\n",
+        "         row_number() OVER (PARTITION BY n.city ORDER BY n.listings DESC)         AS size_rank\n",
+        "  FROM workspace.airbnb.gold_neighbourhood_metrics n\n",
+        "  WHERE n.listings_with_price >= 20\n",
+        "    AND n.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_neighbourhood_metrics x WHERE x.city = n.city)\n",
+        ")\n",
+        "SELECT initcap(city) AS city, neighbourhood, listings, round(median_price_eur, 1) AS median_price_eur,\n",
+        "       price_rank, size_rank,\n",
+        "       CASE WHEN price_rank <= 10 THEN '1' ELSE '0' END AS price_rank_ok,\n",
+        "       CASE WHEN size_rank <= 10 THEN '1' ELSE '0' END AS size_rank_ok,\n",
+        "       concat(initcap(city), ': ', neighbourhood) AS city_neighbourhood\n",
+        "FROM n WHERE price_rank <= 10 OR size_rank <= 10\n",
+        ") t\n",
+        "WHERE size_rank_ok = '1'\n"
+      ]
+    },
+    {
+      "name": "ds_room_mix__is_ab_1",
+      "displayName": "ds_room_mix__is_ab_1",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "SELECT\n",
+        "  initcap(m.city)                      AS city,\n",
+        "  m.room_type,\n",
+        "  m.listings,\n",
+        "  round(100 * m.share_of_listings, 1)  AS pct_of_city_listings,\n",
+        "  round(m.median_price_eur, 1)         AS median_price_eur,\n",
+        "  CASE WHEN m.city IN ('berlin', 'vienna') THEN '1' ELSE '0' END AS is_ab\n",
+        "FROM workspace.airbnb.gold_city_metrics m\n",
+        "WHERE m.room_type <> 'All' AND m.snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_city_metrics x WHERE x.city = m.city)\n",
+        ") t\n",
+        "WHERE is_ab = '1'\n"
+      ]
+    },
+    {
+      "name": "ds_ab_segments__dimension_stay_type",
+      "displayName": "ds_ab_segments__dimension_stay_type",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        ")\n",
+        "SELECT initcap(f.city) AS city, 'stay type' AS dimension,\n",
+        "       CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS segment,\n",
+        "       count(*) AS listings, round(percentile(f.price_eur, 0.5), 1) AS median_price_eur\n",
+        "FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "WHERE f.is_trainable AND f.city IN ('berlin', 'vienna')\n",
+        "GROUP BY 1, 2, 3\n",
+        "UNION ALL\n",
+        "SELECT initcap(f.city), 'distance to centre',\n",
+        "       CASE WHEN f.dist_to_centre_km < 2 THEN 'a) 0-2 km' WHEN f.dist_to_centre_km < 5 THEN 'b) 2-5 km'\n",
+        "            WHEN f.dist_to_centre_km < 10 THEN 'c) 5-10 km' ELSE 'd) 10+ km' END,\n",
+        "       count(*), round(percentile(f.price_eur, 0.5), 1)\n",
+        "FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "WHERE f.is_trainable AND f.city IN ('berlin', 'vienna')\n",
+        "GROUP BY 1, 2, 3\n",
+        ") t\n",
+        "WHERE dimension = 'stay type'\n"
+      ]
+    },
+    {
+      "name": "ds_ab_segments__dimension_distance_to_centre",
+      "displayName": "ds_ab_segments__dimension_distance_to_centre",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        ")\n",
+        "SELECT initcap(f.city) AS city, 'stay type' AS dimension,\n",
+        "       CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS segment,\n",
+        "       count(*) AS listings, round(percentile(f.price_eur, 0.5), 1) AS median_price_eur\n",
+        "FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "WHERE f.is_trainable AND f.city IN ('berlin', 'vienna')\n",
+        "GROUP BY 1, 2, 3\n",
+        "UNION ALL\n",
+        "SELECT initcap(f.city), 'distance to centre',\n",
+        "       CASE WHEN f.dist_to_centre_km < 2 THEN 'a) 0-2 km' WHEN f.dist_to_centre_km < 5 THEN 'b) 2-5 km'\n",
+        "            WHEN f.dist_to_centre_km < 10 THEN 'c) 5-10 km' ELSE 'd) 10+ km' END,\n",
+        "       count(*), round(percentile(f.price_eur, 0.5), 1)\n",
+        "FROM workspace.airbnb.gold_listing_features f JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "WHERE f.is_trainable AND f.city IN ('berlin', 'vienna')\n",
+        "GROUP BY 1, 2, 3\n",
+        ") t\n",
+        "WHERE dimension = 'distance to centre'\n"
+      ]
+    },
+    {
+      "name": "ds_model_metrics__segment_all",
+      "displayName": "ds_model_metrics__segment_all",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "SELECT\n",
+        "  model_version,\n",
+        "  CASE WHEN city = 'berlin+vienna' THEN 'Berlin + Vienna' ELSE initcap(city) END AS city,\n",
+        "  CASE WHEN evaluated_on = 'test' THEN 'test set (20 % of listings)'\n",
+        "       WHEN model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "       ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "  segment, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, median_ae_eur, bias_eur, median_price_eur\n",
+        "FROM workspace.airbnb.gold_model_metrics\n",
+        ") t\n",
+        "WHERE segment = 'all'\n"
+      ]
+    },
+    {
+      "name": "ds_error_segments__dimension_room_type",
+      "displayName": "ds_error_segments__dimension_room_type",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT p.model_version, f.city, f.room_type,\n",
+        "         CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "         p.predicted_price_eur - f.price_eur AS err\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        ")\n",
+        "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
+        "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n",
+        "UNION ALL\n",
+        "SELECT model_version, initcap(city), 'stay type', stay_type, count(*), round(avg(abs(err)), 2), round(avg(err), 2)\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n",
+        ") t\n",
+        "WHERE dimension = 'room type'\n"
+      ]
+    },
+    {
+      "name": "ds_error_segments__dimension_stay_type",
+      "displayName": "ds_error_segments__dimension_stay_type",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT p.model_version, f.city, f.room_type,\n",
+        "         CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "         p.predicted_price_eur - f.price_eur AS err\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        ")\n",
+        "SELECT model_version, initcap(city) AS city, 'room type' AS dimension, room_type AS segment,\n",
+        "       count(*) AS n_listings, round(avg(abs(err)), 2) AS mae_eur, round(avg(err), 2) AS bias_eur\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n",
+        "UNION ALL\n",
+        "SELECT model_version, initcap(city), 'stay type', stay_type, count(*), round(avg(abs(err)), 2), round(avg(err), 2)\n",
+        "FROM e GROUP BY 1, 2, 3, 4\n",
+        ") t\n",
+        "WHERE dimension = 'stay type'\n"
+      ]
+    },
+    {
+      "name": "ds_error_by_neighbourhood__top10_1",
+      "displayName": "ds_error_by_neighbourhood__top10_1",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "SELECT *, CASE WHEN under_rank <= 10 THEN '1' ELSE '0' END AS top10 FROM (\n",
+        "WITH latest AS (\n",
+        "  SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "),\n",
+        "e AS (\n",
+        "  SELECT p.model_version, f.city, f.neighbourhood, f.price_eur, p.predicted_price_eur\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        "),\n",
+        "g AS (\n",
+        "  SELECT model_version, city, neighbourhood, count(*) AS n_listings,\n",
+        "         round(percentile(price_eur, 0.5), 1) AS median_actual_eur,\n",
+        "         round(percentile(predicted_price_eur, 0.5), 1) AS median_predicted_eur,\n",
+        "         round(avg(abs(predicted_price_eur - price_eur)), 2) AS mae_eur,\n",
+        "         round(avg(predicted_price_eur - price_eur), 2) AS bias_eur\n",
+        "  FROM e GROUP BY model_version, city, neighbourhood\n",
+        "  HAVING count(*) >= 10\n",
+        ")\n",
+        "SELECT model_version, initcap(city) AS city, neighbourhood,\n",
+        "       concat(initcap(city), ': ', neighbourhood) AS city_neighbourhood,\n",
+        "       n_listings, median_actual_eur, median_predicted_eur, mae_eur, bias_eur,\n",
+        "       row_number() OVER (PARTITION BY model_version, city ORDER BY bias_eur ASC) AS under_rank\n",
+        "FROM g\n",
+        ") t\n",
+        ") t\n",
+        "WHERE top10 = '1'\n"
+      ]
+    },
+    {
+      "name": "ds_extreme_errors__direction_under_priced",
+      "displayName": "ds_extreme_errors__direction_under_priced",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH p AS (\n",
+        "  WITH latest AS (\n",
+        "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "  )\n",
+        "  SELECT\n",
+        "    p.model_version,\n",
+        "    initcap(f.city)                                     AS city,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "    f.listing_id,\n",
+        "    f.neighbourhood,\n",
+        "    f.room_type,\n",
+        "    f.accommodates,\n",
+        "    CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "    round(f.dist_to_centre_km, 2)                       AS dist_to_centre_km,\n",
+        "    f.price_eur                                         AS actual_price_eur,\n",
+        "    p.predicted_price_eur,\n",
+        "    round(p.predicted_price_eur - f.price_eur, 2)       AS error_eur,\n",
+        "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
+        "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
+        "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        "),\n",
+        "r AS (\n",
+        "  SELECT p.*,\n",
+        "         row_number() OVER (PARTITION BY model_version, city, direction\n",
+        "                            ORDER BY CASE WHEN direction = 'under-priced' THEN error_eur ELSE -error_eur END) AS rnk\n",
+        "  FROM p\n",
+        ")\n",
+        "SELECT model_version, city, direction, rnk, neighbourhood, room_type, accommodates, stay_type,\n",
+        "       actual_price_eur, predicted_price_eur, error_eur, listing_url\n",
+        "FROM r WHERE rnk <= 20\n",
+        ") t\n",
+        "WHERE direction = 'under-priced'\n"
+      ]
+    },
+    {
+      "name": "ds_extreme_errors__direction_over_priced",
+      "displayName": "ds_extreme_errors__direction_over_priced",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "WITH p AS (\n",
+        "  WITH latest AS (\n",
+        "    SELECT city, max(snapshot_date) AS snapshot_date FROM workspace.airbnb.gold_listing_features GROUP BY city\n",
+        "  )\n",
+        "  SELECT\n",
+        "    p.model_version,\n",
+        "    initcap(f.city)                                     AS city,\n",
+        "    CASE WHEN f.city IN ('berlin', 'vienna') THEN 'test set (20 % of listings)'\n",
+        "                WHEN p.model_version = 'v1' THEN 'all priced listings (first run)'\n",
+        "                ELSE 'held-out listings only' END AS evaluated_on,\n",
+        "    f.listing_id,\n",
+        "    f.neighbourhood,\n",
+        "    f.room_type,\n",
+        "    f.accommodates,\n",
+        "    CASE WHEN f.is_long_stay THEN 'long stay (30+ nights)' ELSE 'short stay' END AS stay_type,\n",
+        "    round(f.dist_to_centre_km, 2)                       AS dist_to_centre_km,\n",
+        "    f.price_eur                                         AS actual_price_eur,\n",
+        "    p.predicted_price_eur,\n",
+        "    round(p.predicted_price_eur - f.price_eur, 2)       AS error_eur,\n",
+        "    round(abs(p.predicted_price_eur - f.price_eur), 2)  AS abs_error_eur,\n",
+        "    CASE WHEN p.predicted_price_eur < f.price_eur THEN 'under-priced' ELSE 'over-priced' END AS direction,\n",
+        "    concat('https://www.airbnb.com/rooms/', f.listing_id) AS listing_url\n",
+        "  FROM workspace.airbnb.gold_listing_features f\n",
+        "  JOIN latest l ON f.city = l.city AND f.snapshot_date = l.snapshot_date\n",
+        "  JOIN workspace.airbnb.gold_price_predictions p ON p.city = f.city AND p.listing_id = f.listing_id\n",
+        "  WHERE f.is_trainable AND (f.is_test OR (f.city NOT IN ('berlin', 'vienna') AND p.model_version = 'v1'))\n",
+        "),\n",
+        "r AS (\n",
+        "  SELECT p.*,\n",
+        "         row_number() OVER (PARTITION BY model_version, city, direction\n",
+        "                            ORDER BY CASE WHEN direction = 'under-priced' THEN error_eur ELSE -error_eur END) AS rnk\n",
+        "  FROM p\n",
+        ")\n",
+        "SELECT model_version, city, direction, rnk, neighbourhood, room_type, accommodates, stay_type,\n",
+        "       actual_price_eur, predicted_price_eur, error_eur, listing_url\n",
+        "FROM r WHERE rnk <= 20\n",
+        ") t\n",
+        "WHERE direction = 'over-priced'\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "page_overview",
+      "displayName": "City overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "text_01",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Munich is 60 percent more expensive than Berlin and Vienna, which cost almost the same\n",
+                "\n",
+                "Median nightly price of listings with a valid price: Munich 204 EUR, Berlin 129.5 EUR, Vienna 125.3 EUR. Latest Inside Airbnb snapshot of each city (September 2026).\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_02",
+            "queries": [
+              {
+                "name": "f_ds_city_overview_city",
+                "query": {
+                  "datasetName": "ds_city_overview",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_room_mix_city",
+                "query": {
+                  "datasetName": "ds_room_mix",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_price_bins_city",
+                "query": {
+                  "datasetName": "ds_price_bins",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_availability_bins_city",
+                "query": {
+                  "datasetName": "ds_availability_bins",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_neighbourhoods_top_city",
+                "query": {
+                  "datasetName": "ds_neighbourhoods_top",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_neighbourhoods_top__price_rank_ok_1_city",
+                "query": {
+                  "datasetName": "ds_neighbourhoods_top__price_rank_ok_1",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_neighbourhoods_top__size_rank_ok_1_city",
+                "query": {
+                  "datasetName": "ds_neighbourhoods_top__size_rank_ok_1",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_room_mix__is_ab_1_city",
+                "query": {
+                  "datasetName": "ds_room_mix__is_ab_1",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_city_overview_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_room_mix_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_price_bins_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_availability_bins_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_neighbourhoods_top_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_neighbourhoods_top__price_rank_ok_1_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_neighbourhoods_top__size_rank_ok_1_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_room_mix__is_ab_1_city"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "City"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "table_03",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_city_overview",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "snapshot_date",
+                      "expression": "`snapshot_date`"
+                    },
+                    {
+                      "name": "listings",
+                      "expression": "`listings`"
+                    },
+                    {
+                      "name": "median_price_eur",
+                      "expression": "`median_price_eur`"
+                    },
+                    {
+                      "name": "median_availability_365",
+                      "expression": "`median_availability_365`"
+                    },
+                    {
+                      "name": "avg_review_rating",
+                      "expression": "`avg_review_rating`"
+                    },
+                    {
+                      "name": "hosts",
+                      "expression": "`hosts`"
+                    },
+                    {
+                      "name": "listings_per_host",
+                      "expression": "`listings_per_host`"
+                    },
+                    {
+                      "name": "pct_long_stay",
+                      "expression": "`pct_long_stay`"
+                    },
+                    {
+                      "name": "pct_superhost",
+                      "expression": "`pct_superhost`"
+                    },
+                    {
+                      "name": "pct_without_price",
+                      "expression": "`pct_without_price`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "city",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "city",
+                    "displayName": "city",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "snapshot_date",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "snapshot_date",
+                    "displayName": "snapshot_date",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "listings",
+                    "displayName": "listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "median_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "median_price_eur",
+                    "displayName": "median_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "median_availability_365",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "median_availability_365",
+                    "displayName": "median_availability_365",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "avg_review_rating",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "avg_review_rating",
+                    "displayName": "avg_review_rating",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "hosts",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "hosts",
+                    "displayName": "hosts",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "listings_per_host",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "listings_per_host",
+                    "displayName": "listings_per_host",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "pct_long_stay",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 8,
+                    "title": "pct_long_stay",
+                    "displayName": "pct_long_stay",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "pct_superhost",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 9,
+                    "title": "pct_superhost",
+                    "displayName": "pct_superhost",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "pct_without_price",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 10,
+                    "title": "pct_without_price",
+                    "displayName": "pct_without_price",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "City profile",
+                "showDescription": true,
+                "description": "Prices in EUR per night. pct_without_price: listings that showed no price on the snapshot date."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_04",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_room_mix",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "sum(pct_of_city_listings)",
+                      "expression": "SUM(`pct_of_city_listings`)"
+                    },
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                },
+                "y": {
+                  "fieldName": "sum(pct_of_city_listings)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "% of listings"
+                },
+                "color": {
+                  "fieldName": "room_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "room_type"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Room type mix, % of listings"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_05",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_room_mix",
+                  "fields": [
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    },
+                    {
+                      "name": "sum(median_price_eur)",
+                      "expression": "SUM(`median_price_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "room_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "room_type"
+                },
+                "y": {
+                  "fieldName": "sum(median_price_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "median price, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Median price by room type, EUR"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_06",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_price_bins",
+                  "fields": [
+                    {
+                      "name": "price_band_eur",
+                      "expression": "`price_band_eur`"
+                    },
+                    {
+                      "name": "sum(pct_of_city)",
+                      "expression": "SUM(`pct_of_city`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "price_band_eur",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "price band, EUR"
+                },
+                "y": {
+                  "fieldName": "sum(pct_of_city)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "% of priced listings"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Price per night, % of priced listings",
+                "showDescription": true,
+                "description": "Bands of 25 EUR. Listings without a price and outliers are left out."
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_07",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_availability_bins",
+                  "fields": [
+                    {
+                      "name": "days_available",
+                      "expression": "`days_available`"
+                    },
+                    {
+                      "name": "sum(pct_of_city)",
+                      "expression": "SUM(`pct_of_city`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "days_available",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "days available"
+                },
+                "y": {
+                  "fieldName": "sum(pct_of_city)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "% of listings"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Days available in the next 365 days, % of listings"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_08",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_neighbourhoods_top__price_rank_ok_1",
+                  "fields": [
+                    {
+                      "name": "sum(median_price_eur)",
+                      "expression": "SUM(`median_price_eur`)"
+                    },
+                    {
+                      "name": "city_neighbourhood",
+                      "expression": "`city_neighbourhood`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(median_price_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "median price, EUR"
+                },
+                "y": {
+                  "fieldName": "city_neighbourhood",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "neighbourhood"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most expensive neighbourhoods (top 10 per city, 20+ priced listings)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 25,
+            "width": 3,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_09",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_neighbourhoods_top__size_rank_ok_1",
+                  "fields": [
+                    {
+                      "name": "sum(listings)",
+                      "expression": "SUM(`listings`)"
+                    },
+                    {
+                      "name": "city_neighbourhood",
+                      "expression": "`city_neighbourhood`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(listings)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "listings"
+                },
+                "y": {
+                  "fieldName": "city_neighbourhood",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "neighbourhood"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Neighbourhoods with the most listings (top 10 per city)"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 25,
+            "width": 3,
+            "height": 9
+          }
+        }
+      ]
+    },
+    {
+      "name": "page_compare",
+      "displayName": "Berlin vs Vienna",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "text_10",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Berlin and Vienna cost the same per night, but Berlin is a long-stay market and Vienna a professional short-stay one\n",
+                "\n",
+                "Median price differs by only 4 EUR. A third of Berlin listings ask for 30+ nights against one in ten in Vienna. Vienna hosts run more listings each (2.31 against 1.56) and their listings are open more days a year (193 against 141). Long stays cost much less per night, so the stay type matters more for the model than the city.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "table_11",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_compare_ab",
+                  "fields": [
+                    {
+                      "name": "metric",
+                      "expression": "`metric`"
+                    },
+                    {
+                      "name": "berlin",
+                      "expression": "`berlin`"
+                    },
+                    {
+                      "name": "vienna",
+                      "expression": "`vienna`"
+                    },
+                    {
+                      "name": "vienna_minus_berlin",
+                      "expression": "`vienna_minus_berlin`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "metric",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "metric",
+                    "displayName": "metric",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "berlin",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "berlin",
+                    "displayName": "berlin",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "vienna",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "vienna",
+                    "displayName": "vienna",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "vienna_minus_berlin",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "vienna_minus_berlin",
+                    "displayName": "vienna_minus_berlin",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Berlin against Vienna"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_12",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_room_mix__is_ab_1",
+                  "fields": [
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    },
+                    {
+                      "name": "sum(median_price_eur)",
+                      "expression": "SUM(`median_price_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "room_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "room_type"
+                },
+                "y": {
+                  "fieldName": "sum(median_price_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "median price, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Median price by room type, EUR"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_13",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ab_segments__dimension_stay_type",
+                  "fields": [
+                    {
+                      "name": "segment",
+                      "expression": "`segment`"
+                    },
+                    {
+                      "name": "sum(median_price_eur)",
+                      "expression": "SUM(`median_price_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "segment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "stay type"
+                },
+                "y": {
+                  "fieldName": "sum(median_price_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "median price, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Median price by stay type, EUR",
+                "showDescription": true,
+                "description": "Long-stay listings (minimum 30 nights) are priced per night far below short stays."
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "line_14",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ab_segments__dimension_distance_to_centre",
+                  "fields": [
+                    {
+                      "name": "segment",
+                      "expression": "`segment`"
+                    },
+                    {
+                      "name": "sum(median_price_eur)",
+                      "expression": "SUM(`median_price_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "segment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "distance to centre"
+                },
+                "y": {
+                  "fieldName": "sum(median_price_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "median price, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Median price by distance to the centre, EUR"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 9,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_15",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_room_mix__is_ab_1",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "sum(pct_of_city_listings)",
+                      "expression": "SUM(`pct_of_city_listings`)"
+                    },
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                },
+                "y": {
+                  "fieldName": "sum(pct_of_city_listings)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "% of listings"
+                },
+                "color": {
+                  "fieldName": "room_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "room_type"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Room type mix, % of listings"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "text_16",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### What matters for the model\n",
+                "\n",
+                "- **Stay type.** Berlin has three times more long-stay listings. `minimum_nights` is the strongest feature of the model.\n",
+                "- **Missing prices.** 34 percent of Berlin listings and 24 percent of Vienna listings have no price, so they cannot be used for training.\n",
+                "- **Location.** In both cities the price falls with distance from the centre, so `dist_to_centre_km` carries over between cities, but district names do not.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 15,
+            "width": 3,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "page_model",
+      "displayName": "Model",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "text_17",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Trained only on Berlin and Vienna, the model beats the baseline by 31 percent there; in Munich v2 cuts the error from 157 to 115 EUR\n",
+                "\n",
+                "Both models are trained on Berlin and Vienna only. v1 is the model of the first run, v2 the model after the changes (no city and no raw coordinates, price relative to the city's median price). Berlin and Vienna: 20 % test listings. Munich: v1 on all 5,076 priced listings, v2 only on the 1,019 held-out listings. Error = predicted minus actual price; below zero means under-priced.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_18",
+            "queries": [
+              {
+                "name": "f_ds_model_metrics_model_version",
+                "query": {
+                  "datasetName": "ds_model_metrics",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_model_mae_long_model_version",
+                "query": {
+                  "datasetName": "ds_model_mae_long",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_predictions_model_version",
+                "query": {
+                  "datasetName": "ds_predictions",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments_model_version",
+                "query": {
+                  "datasetName": "ds_error_segments",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_by_neighbourhood_model_version",
+                "query": {
+                  "datasetName": "ds_error_by_neighbourhood",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors_model_version",
+                "query": {
+                  "datasetName": "ds_extreme_errors",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_model_metrics__segment_all_model_version",
+                "query": {
+                  "datasetName": "ds_model_metrics__segment_all",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments__dimension_room_type_model_version",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_room_type",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments__dimension_stay_type_model_version",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_stay_type",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_by_neighbourhood__top10_1_model_version",
+                "query": {
+                  "datasetName": "ds_error_by_neighbourhood__top10_1",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors__direction_under_priced_model_version",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_under_priced",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors__direction_over_priced_model_version",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_over_priced",
+                  "fields": [
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_model_metrics_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_model_mae_long_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_predictions_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_error_segments_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_error_by_neighbourhood_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_extreme_errors_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_model_metrics__segment_all_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_error_segments__dimension_room_type_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_error_segments__dimension_stay_type_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_error_by_neighbourhood__top10_1_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_extreme_errors__direction_under_priced_model_version"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "queryName": "f_ds_extreme_errors__direction_over_priced_model_version"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Model version"
+              },
+              "selection": {
+                "defaultSelection": {
+                  "values": {
+                    "dataType": "STRING",
+                    "values": [
+                      {
+                        "value": "v1"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_19",
+            "queries": [
+              {
+                "name": "f_ds_model_metrics_city",
+                "query": {
+                  "datasetName": "ds_model_metrics",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_model_mae_long_city",
+                "query": {
+                  "datasetName": "ds_model_mae_long",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_predictions_city",
+                "query": {
+                  "datasetName": "ds_predictions",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments_city",
+                "query": {
+                  "datasetName": "ds_error_segments",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_by_neighbourhood_city",
+                "query": {
+                  "datasetName": "ds_error_by_neighbourhood",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors_city",
+                "query": {
+                  "datasetName": "ds_extreme_errors",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_model_metrics__segment_all_city",
+                "query": {
+                  "datasetName": "ds_model_metrics__segment_all",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments__dimension_room_type_city",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_room_type",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_segments__dimension_stay_type_city",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_stay_type",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_error_by_neighbourhood__top10_1_city",
+                "query": {
+                  "datasetName": "ds_error_by_neighbourhood__top10_1",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors__direction_under_priced_city",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_under_priced",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_ds_extreme_errors__direction_over_priced_city",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_over_priced",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_model_metrics_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_model_mae_long_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_predictions_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_error_segments_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_error_by_neighbourhood_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_extreme_errors_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_model_metrics__segment_all_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_error_segments__dimension_room_type_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_error_segments__dimension_stay_type_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_error_by_neighbourhood__top10_1_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_extreme_errors__direction_under_priced_city"
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "city",
+                    "queryName": "f_ds_extreme_errors__direction_over_priced_city"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "City"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "table_20",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_model_metrics__segment_all",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "evaluated_on",
+                      "expression": "`evaluated_on`"
+                    },
+                    {
+                      "name": "n_listings",
+                      "expression": "`n_listings`"
+                    },
+                    {
+                      "name": "mae_baseline_eur",
+                      "expression": "`mae_baseline_eur`"
+                    },
+                    {
+                      "name": "mae_model_eur",
+                      "expression": "`mae_model_eur`"
+                    },
+                    {
+                      "name": "improvement_pct",
+                      "expression": "`improvement_pct`"
+                    },
+                    {
+                      "name": "bias_eur",
+                      "expression": "`bias_eur`"
+                    },
+                    {
+                      "name": "median_price_eur",
+                      "expression": "`median_price_eur`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "city",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "city",
+                    "displayName": "city",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "evaluated_on",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "evaluated_on",
+                    "displayName": "evaluated_on",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "n_listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "n_listings",
+                    "displayName": "n_listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "mae_baseline_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "mae_baseline_eur",
+                    "displayName": "mae_baseline_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_model_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "mae_model_eur",
+                    "displayName": "mae_model_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "improvement_pct",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "improvement_pct",
+                    "displayName": "improvement_pct",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "bias_eur",
+                    "displayName": "bias_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "median_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "median_price_eur",
+                    "displayName": "median_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "MAE in EUR: baseline against model"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_21",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_model_mae_long",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "sum(mae_eur)",
+                      "expression": "SUM(`mae_eur`)"
+                    },
+                    {
+                      "name": "predictor",
+                      "expression": "`predictor`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                },
+                "y": {
+                  "fieldName": "sum(mae_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "MAE, EUR"
+                },
+                "color": {
+                  "fieldName": "predictor",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "predictor"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "MAE, EUR (lower is better)"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "text_22",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Munich: v1 against v2 on the same 1,019 held-out listings\n",
+                "\n",
+                "The Munich rows of the table above cover different listings for v1 and v2, so compare the versions here.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_23",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_like_for_like",
+                  "fields": [
+                    {
+                      "name": "predictor",
+                      "expression": "`predictor`"
+                    },
+                    {
+                      "name": "sum(mae_eur)",
+                      "expression": "SUM(`mae_eur`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "predictor",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "predictor"
+                },
+                "y": {
+                  "fieldName": "sum(mae_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "MAE, EUR"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Munich, same held-out listings: MAE, EUR"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_24",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_like_for_like",
+                  "fields": [
+                    {
+                      "name": "predictor",
+                      "expression": "`predictor`"
+                    },
+                    {
+                      "name": "n_listings",
+                      "expression": "`n_listings`"
+                    },
+                    {
+                      "name": "mae_eur",
+                      "expression": "`mae_eur`"
+                    },
+                    {
+                      "name": "bias_eur",
+                      "expression": "`bias_eur`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "predictor",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "predictor",
+                    "displayName": "predictor",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "n_listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "n_listings",
+                    "displayName": "n_listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "mae_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "mae_eur",
+                    "displayName": "mae_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "bias_eur",
+                    "displayName": "bias_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Munich, same held-out listings",
+                "showDescription": true,
+                "description": "bias below 0 = under-priced on average"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_25",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_munich_neighbourhoods",
+                  "fields": [
+                    {
+                      "name": "neighbourhood",
+                      "expression": "`neighbourhood`"
+                    },
+                    {
+                      "name": "n_listings",
+                      "expression": "`n_listings`"
+                    },
+                    {
+                      "name": "median_price_eur",
+                      "expression": "`median_price_eur`"
+                    },
+                    {
+                      "name": "mae_v1_eur",
+                      "expression": "`mae_v1_eur`"
+                    },
+                    {
+                      "name": "mae_v2_eur",
+                      "expression": "`mae_v2_eur`"
+                    },
+                    {
+                      "name": "mae_baseline_eur",
+                      "expression": "`mae_baseline_eur`"
+                    },
+                    {
+                      "name": "bias_v1_eur",
+                      "expression": "`bias_v1_eur`"
+                    },
+                    {
+                      "name": "bias_v2_eur",
+                      "expression": "`bias_v2_eur`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "neighbourhood",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "neighbourhood",
+                    "displayName": "neighbourhood",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "n_listings",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "n_listings",
+                    "displayName": "n_listings",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "median_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "median_price_eur",
+                    "displayName": "median_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_v1_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "mae_v1_eur",
+                    "displayName": "mae_v1_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_v2_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "mae_v2_eur",
+                    "displayName": "mae_v2_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "mae_baseline_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "mae_baseline_eur",
+                    "displayName": "mae_baseline_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_v1_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "bias_v1_eur",
+                    "displayName": "bias_v1_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_v2_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "bias_v2_eur",
+                    "displayName": "bias_v2_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Munich by neighbourhood (held-out listings, 10+ per district)",
+                "showDescription": true,
+                "description": "Sort by a column to see where each model errs most."
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 8,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "scatter_26",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_predictions",
+                  "fields": [
+                    {
+                      "name": "actual_price_eur",
+                      "expression": "`actual_price_eur`"
+                    },
+                    {
+                      "name": "predicted_price_eur",
+                      "expression": "`predicted_price_eur`"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "scatter",
+              "encodings": {
+                "x": {
+                  "fieldName": "actual_price_eur",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "actual price, EUR"
+                },
+                "y": {
+                  "fieldName": "predicted_price_eur",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "predicted price, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Predicted against actual price, EUR",
+                "showDescription": true,
+                "description": "Points below the diagonal are under-priced."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_27",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_room_type",
+                  "fields": [
+                    {
+                      "name": "segment",
+                      "expression": "`segment`"
+                    },
+                    {
+                      "name": "sum(mae_eur)",
+                      "expression": "SUM(`mae_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "segment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "room type"
+                },
+                "y": {
+                  "fieldName": "sum(mae_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "MAE, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "MAE by room type, EUR"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 14,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_28",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_error_segments__dimension_stay_type",
+                  "fields": [
+                    {
+                      "name": "segment",
+                      "expression": "`segment`"
+                    },
+                    {
+                      "name": "sum(bias_eur)",
+                      "expression": "SUM(`bias_eur`)"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "segment",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "stay type"
+                },
+                "y": {
+                  "fieldName": "sum(bias_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "average error, EUR"
+                },
+                "color": {
+                  "fieldName": "city",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "city"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Average error by stay type, EUR (below 0 = under-priced)"
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_29",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_error_by_neighbourhood__top10_1",
+                  "fields": [
+                    {
+                      "name": "sum(bias_eur)",
+                      "expression": "SUM(`bias_eur`)"
+                    },
+                    {
+                      "name": "city_neighbourhood",
+                      "expression": "`city_neighbourhood`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(bias_eur)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "average error, EUR"
+                },
+                "y": {
+                  "fieldName": "city_neighbourhood",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x"
+                    }
+                  },
+                  "displayName": "neighbourhood"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Neighbourhoods the model under-prices most (top 10 per city, 10+ listings)"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 21,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_30",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_under_priced",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "rnk",
+                      "expression": "`rnk`"
+                    },
+                    {
+                      "name": "neighbourhood",
+                      "expression": "`neighbourhood`"
+                    },
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    },
+                    {
+                      "name": "accommodates",
+                      "expression": "`accommodates`"
+                    },
+                    {
+                      "name": "stay_type",
+                      "expression": "`stay_type`"
+                    },
+                    {
+                      "name": "actual_price_eur",
+                      "expression": "`actual_price_eur`"
+                    },
+                    {
+                      "name": "predicted_price_eur",
+                      "expression": "`predicted_price_eur`"
+                    },
+                    {
+                      "name": "error_eur",
+                      "expression": "`error_eur`"
+                    },
+                    {
+                      "name": "listing_url",
+                      "expression": "`listing_url`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "city",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "city",
+                    "displayName": "city",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "rnk",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "rnk",
+                    "displayName": "rnk",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "neighbourhood",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 2,
+                    "title": "neighbourhood",
+                    "displayName": "neighbourhood",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "room_type",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 3,
+                    "title": "room_type",
+                    "displayName": "room_type",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "accommodates",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "accommodates",
+                    "displayName": "accommodates",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "stay_type",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 5,
+                    "title": "stay_type",
+                    "displayName": "stay_type",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "actual_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "actual_price_eur",
+                    "displayName": "actual_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "predicted_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "predicted_price_eur",
+                    "displayName": "predicted_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "error_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 8,
+                    "title": "error_eur",
+                    "displayName": "error_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "listing_url",
+                    "type": "string",
+                    "displayAs": "link",
+                    "visible": true,
+                    "order": 9,
+                    "title": "listing_url",
+                    "displayName": "listing_url",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Most under-priced listings (top 20 per city, EUR)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 27,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_31",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_extreme_errors__direction_over_priced",
+                  "fields": [
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "rnk",
+                      "expression": "`rnk`"
+                    },
+                    {
+                      "name": "neighbourhood",
+                      "expression": "`neighbourhood`"
+                    },
+                    {
+                      "name": "room_type",
+                      "expression": "`room_type`"
+                    },
+                    {
+                      "name": "accommodates",
+                      "expression": "`accommodates`"
+                    },
+                    {
+                      "name": "stay_type",
+                      "expression": "`stay_type`"
+                    },
+                    {
+                      "name": "actual_price_eur",
+                      "expression": "`actual_price_eur`"
+                    },
+                    {
+                      "name": "predicted_price_eur",
+                      "expression": "`predicted_price_eur`"
+                    },
+                    {
+                      "name": "error_eur",
+                      "expression": "`error_eur`"
+                    },
+                    {
+                      "name": "listing_url",
+                      "expression": "`listing_url`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "city",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "city",
+                    "displayName": "city",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "rnk",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 1,
+                    "title": "rnk",
+                    "displayName": "rnk",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "neighbourhood",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 2,
+                    "title": "neighbourhood",
+                    "displayName": "neighbourhood",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "room_type",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 3,
+                    "title": "room_type",
+                    "displayName": "room_type",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "accommodates",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "accommodates",
+                    "displayName": "accommodates",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "stay_type",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 5,
+                    "title": "stay_type",
+                    "displayName": "stay_type",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "actual_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "actual_price_eur",
+                    "displayName": "actual_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "predicted_price_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "predicted_price_eur",
+                    "displayName": "predicted_price_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "error_eur",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 8,
+                    "title": "error_eur",
+                    "displayName": "error_eur",
+                    "alignContent": "right",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "listing_url",
+                    "type": "string",
+                    "displayAs": "link",
+                    "visible": true,
+                    "order": 9,
+                    "title": "listing_url",
+                    "displayName": "listing_url",
+                    "alignContent": "left",
+                    "allowSearch": false,
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Most over-priced listings (top 20 per city, EUR)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 34,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "text_32",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Munich: what happened and what changed\n",
+                "\n",
+                "**First run (v1, unchanged).** MAE 149.61 EUR on all 5,076 priced listings against 40.39 EUR on the Berlin and Vienna test set; the baseline gets 163.24 EUR. Munich is much more expensive (median 204 EUR against about 127), the model had never seen `city = munich` and every Munich longitude is outside the training range, so it predicted Berlin and Vienna prices: bias about -143 EUR. Long stays transferred (MAE about 45 EUR), short stays did not (about 152 EUR).\n",
+                "\n",
+                "**After the changes (v2, still trained on Berlin and Vienna only).** Without city and raw coordinates, and with the price predicted relative to the city's median price. On the same 1,019 held-out Munich listings: baseline 171.31, v1 156.90, v2 115.36 EUR. The price level explains most of the gap. v2 costs 2.55 EUR in Berlin and Vienna (42.94 against 40.39 EUR).\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 41,
+            "width": 6,
+            "height": 4
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    }
+  }
+}

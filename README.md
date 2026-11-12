@@ -75,14 +75,17 @@ The baseline was written twice: in pandas inside the model notebook and in Spark
 
 ## Results
 
-MAE in EUR. Berlin and Vienna: held-out test set (about 20 percent of listings per city). Munich: every priced listing.
+MAE in EUR. Both models are trained on Berlin and Vienna only; no model is trained on Munich. v1 is the model of the first run, v2 the model after the changes (no `city` and no raw coordinates, price predicted relative to the city's median price).
 
-| | Baseline | Model v1 |
-|---|---|---|
-| Berlin (test) | 63.80 | 42.85 |
-| Vienna (test) | 54.85 | 38.33 |
-| Berlin + Vienna (test) | 58.93 | 40.39 |
-| Munich, first run, model unchanged | 163.24 | 149.61 |
+| | Baseline | Model v1 | Model v2 |
+|---|---|---|---|
+| Berlin (test) | 63.80 | 42.85 | |
+| Vienna (test) | 54.85 | 38.33 | |
+| Berlin + Vienna (test, 3,673 listings) | 58.93 | 40.39 | 42.94 |
+| Munich, first run, all 5,076 priced listings | 163.24 | 149.61 | |
+| Munich, the same 1,019 held-out listings | 171.31 | 156.90 | 115.36 |
+
+v2 is measured on Munich's held-out listings only (`is_test = true`), because it takes Munich's median price from the other Munich listings. So the fair comparison of v1 and v2 on Munich is the last row, not 149.61 against 115.36.
 
 ## City C: Munich
 
@@ -97,7 +100,9 @@ MAE in EUR. Berlin and Vienna: held-out test set (about 20 percent of listings p
 
 The baseline fails for the same reason: it is also built from Berlin and Vienna prices.
 
-**Changes.** Pipeline fixes are listed in the pipeline README, model changes (v2) in the model README. The Model page of the dashboard shows Munich next to Berlin and Vienna and switches between v1 and v2 with a filter.
+**Changes.** No pipeline defect was found (see the pipeline README). Model v2 makes two changes, both still trained on Berlin and Vienna only: it drops `city` and the raw coordinates, which did not transfer (Munich MAE 156.90 to 149.18 EUR), and predicts the price relative to the city's median price, where Munich contributes one number, its median price (149.18 to 115.36 EUR). The price level was the largest part of the gap. v2 costs 2.55 EUR on Berlin and Vienna (42.94 against 40.39 EUR). Details in the model README.
+
+**After the changes Munich is still harder** (115.36 against 42.94 EUR). One price level does not capture that Munich prices are spread wider: large and central listings cost much more there. The Model page of the dashboard compares baseline, v1 and v2 on the same held-out Munich listings, overall and per neighbourhood.
 
 ## Team
 
