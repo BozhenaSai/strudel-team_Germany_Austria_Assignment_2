@@ -75,7 +75,7 @@ The first run used the pipeline as tagged `v1-AB` plus one fix made just before 
 | median price of priced listings (EUR) | 204 | 129.5 | 125.3 |
 | city centre (lat, lon) | 48.1368, 11.5638 | 52.5096, 13.4084 | 48.2038, 16.3598 |
 
-What was checked on the Munich output: broken characters in district and property type (none), room type labels (the same four as in the other cities), missing values (`neighbourhood_group` is empty for every Munich listing, as it is for Vienna, and gold does not use it), price outliers, the city centre, the feature distributions in gold and the row balance between the layers.
+What was checked on the Munich output: broken characters in district and property type (none), room type labels (the same four as in the other cities), missing values (`neighbourhood_group` is empty for every Munich listing, as it is for Vienna, and gold does not use it), price outliers, the city centre, the feature distributions in gold, every gold feature column per city for being almost empty (95 percent NULL or more) or constant (none were), and the row balance between the layers.
 
 **Pipeline fixes: one, minor.** The notebooks `01_bronze` to `04_checks` still had a leftover test cell that reset the city to `vienna`. It was removed from all four before the run (commit `c08b6c5`), so the city comes only from the Job parameters. It changes no data and no rule. Apart from it, nothing was found that the pipeline should have handled differently. The four price outliers (private rooms between 3,547 and 79,600 EUR) were flagged `extreme_high` by the relative rule and are not trainable, so the rule worked on a new city without any change.
 

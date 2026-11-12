@@ -25,7 +25,7 @@ Raw files live in a Databricks Volume, not in git: `/Volumes/workspace/airbnb/ra
 | Folder | Content | Details |
 |---|---|---|
 | `eda/` | `eda_berlin_vienna.ipynb`: exploratory analysis of Berlin and Vienna, cleaning rules, leakage review | |
-| `pipeline/` | Databricks Job `airbnb_price_pipeline`: bronze → silver → gold → checks, city as a parameter | [`pipeline/README_pipeline.md`](pipeline/README_pipeline.md) |
+| `pipeline/` | Databricks Job `airbnb_price_pipeline` (bronze, silver, gold, checks), city as a parameter, `job_definition.yml` | [`pipeline/README_pipeline.md`](pipeline/README_pipeline.md) |
 | `baseline/` | `01_baseline.py`: baseline (median price by room type and guests) and its check against the model notebook | below |
 | `model/` | training and evaluation (`01_train_evaluate`), scoring a new city (`02_score_city`) | [`model/README_model.md`](model/README_model.md) |
 | `dashboard/` | SQL of every dashboard dataset, page layout and titles, exported dashboard | [`dashboard/README_dashboard.md`](dashboard/README_dashboard.md) |
@@ -42,6 +42,30 @@ All tables are in `workspace.airbnb`. The layer is the table prefix (`bronze_`, 
 4. Run `model/01_train_evaluate` (`train_cities = berlin,vienna`, `model_version = v1`).
 5. Run `model/02_score_city` (`cities = munich`, `model_version = v1`).
 6. Open the dashboard and the Genie Agent. They read the gold tables, so nothing needs refreshing by hand.
+
+## Pipeline
+
+One Databricks Job, `airbnb_price_pipeline`, turns a raw `listings.csv.gz` into cleaned listings, model features and dashboard metrics. The city is a parameter (`city`, `snapshot_date`, `currency`). To add a city, upload its file to the Volume and run the Job with new values. No code is copied. Details and the exact rules are in [`pipeline/README_pipeline.md`](pipeline/README_pipeline.md).
+
+| Layer | Notebook | Tables | Purpose |
+|---|---|---|---|
+| Bronze | `01_bronze` | `bronze_listings` | the raw file as text (all 90 columns) plus city, snapshot date, source and load time |
+| Silver | `02_silver` | `silver_listings`, `quarantine_listings` | typed and deduplicated listings, broken rows set aside with the failed rule, price outliers flagged and kept |
+| Gold | `03_gold` | `gold_listing_features`, `gold_city_metrics`, `gold_neighbourhood_metrics`, `gold_city_centre` | model features without leakage, metrics for the dashboard, the city centre |
+| Checks | `04_checks` | | fails the Job if the output cannot be trusted |
+
+Design choices:
+
+- **Re-runs are safe.** Running a city again replaces only that city and snapshot (`replaceWhere`). Nothing is duplicated and other cities are never touched.
+- **Quarantine instead of dropping.** Rows that break a rule (no id, impossible coordinates, no room type, no guests) go to `quarantine_listings` with the reason. The row count is checked on every run: rows received equal silver plus quarantined plus duplicates removed.
+- **Prices are never invented.** A listing without a price stays in silver with a flag and is left out of training. Outliers are found with a relative rule (3 IQR of log price within city and room type), so no fixed price limit has to be tuned for a new city.
+- **No leakage in gold.** No `estimated_*`, no `price_quote_*`, no `availability_30/60/90`, no ids and no free text.
+- **Location without per-city setup.** `dist_to_centre_km` is the distance to the median coordinate of the city's listings (table `gold_city_centre`). District names are not used because they do not carry over between cities.
+- **Stable test split.** `is_test` marks about 20 percent of the listings per city, chosen by a hash of the id, so it is the same on every run.
+- **Failures leave a record.** Every stage writes a line to `pipeline_run_log` (in, out, set aside). If a stage crashes, the error is written there before the Job fails.
+- **Built for Free Edition.** Serverless compute runs with ANSI mode on, so every cast is a `try_cast`. Host text fields contain line breaks, so the CSV is read with `multiLine`.
+
+Pipeline on Munich: the Job ran end to end on the snapshot of 2026-09-23. 7,493 listings in bronze and silver, none quarantined, no duplicates, 5,076 trainable listings, 2,413 without a price, 4 price outliers (private rooms between 3,547 and 79,600 EUR) excluded from training by the relative rule, and all 8 checks passed. One minor pipeline fix was made before the run (a leftover test cell in the four notebooks that reset the city to Vienna). No other defect was found, including a check of every gold feature column per city for being almost empty or constant.
 
 ## Baseline
 
@@ -80,7 +104,7 @@ The baseline fails for the same reason: it is also built from Berlin and Vienna 
 | Participant | Part |
 |---|---|
 | 1 | data, EDA, leakage review, architecture, presentation |
-| 2 | pipeline, team admin |
+| 2 | pipeline (Job, bronze, silver, gold, checks, run log), team admin |
 | 3 | model, city C model changes |
 | 4 | baseline, dashboard, Genie Agent, repository |
 
