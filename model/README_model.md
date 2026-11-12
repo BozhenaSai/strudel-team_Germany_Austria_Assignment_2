@@ -8,7 +8,7 @@ Trained on Berlin and Vienna, then applied unchanged to a new city.
 | `00_model_common` | Feature lists, preprocessing, baseline, metric, table writers. Pulled in with `%run`, not run on its own. | none |
 | `01_train_evaluate` | Chooses the model by cross-validation on the train rows, fits it, reports test-set MAE against the baseline, saves the model, writes predictions for the training cities. | `train_cities` = `berlin,vienna`, `model_version` = `v1` |
 | `02_score_city` | Loads the saved model and scores another city. Fits nothing. Reports the error on the new city next to the training cities and explains the gap. | `cities` = `munich`, `model_version` = `v1` |
-| `03_model_v2` | The model changes after the first run on city C, applied one on top of the other and measured on Munich's held-out rows. Saves model v2 and writes its predictions for all three cities. | `new_city` = `munich`, `base_version` = `v1`, `new_version` = `v2` |
+| `03_model_v2` | The model changes after the first run on city C, applied one on top of the other and measured on Munich's held-out rows. Saves the chosen step as model v2 and writes its predictions for all three cities. | `new_city` = `munich`, `base_version` = `v1`, `new_version` = `v2`, `final_step` = `B` |
 
 ## Rules the model follows
 
@@ -103,38 +103,54 @@ What the first run showed:
 |---|---|---|---|
 | A | Remove `city`, `latitude`, `longitude` | Unseen city value; coordinates outside the training range. `dist_to_centre_km` carries location the same way in every city. | none |
 | B | Predict price relative to the city's median price | A price level the model never saw | one number: the median of Munich's train rows |
-| C | Retrain on Berlin + Vienna + Munich train rows (= v2) | One factor is not enough: Munich prices are spread wider | Munich's train rows |
+
+**Model v2 is step B.** The assignment reports the error on A and B and on city C separately, also after the changes, so Munich stays a city the model was not trained on. In step B the model is fitted on Berlin and Vienna rows only; Munich contributes one number, its median price, used when a prediction is converted to euros. No model is trained on Munich listings.
 
 ### After the changes
 
-Every row is measured on the same 1,019 held-out Munich listings (`is_test = true`). On these rows the first run gives 156.90 EUR (149.61 EUR on all 5,076 priced listings).
+Every row is measured on the same 1,019 held-out Munich listings (`is_test = true`), because step B takes Munich's median price from the other Munich rows. On these listings the first run gives 156.90 EUR (149.61 EUR on all 5,076 priced listings).
 
-| Step | MAE on Munich (EUR) | MAE on Berlin + Vienna test (EUR) |
-|---|---|---|
-| Baseline, Berlin + Vienna medians | 171.31 | 58.93 |
-| Baseline, Munich medians | 122.93 | n/a |
-| v1, first run | 156.90 | 40.39 |
-| A: without city, latitude, longitude | 149.18 | 42.87 |
-| B: A + price relative to the city level | 115.36 | 42.94 |
-| C: B retrained with Munich = v2 | 106.53 | 43.50 |
+| Step | Munich prices used | MAE on Munich (EUR) | MAE on Berlin + Vienna test (EUR) |
+|---|---|---|---|
+| Baseline, Berlin + Vienna medians | none | 171.31 | 58.93 |
+| v1, first run | none | 156.90 | 40.39 |
+| A: without city, latitude, longitude | none | 149.18 | 42.87 |
+| **B: A + price relative to the city level = v2** | one number: Munich's median price | **115.36** | **42.94** |
+| Reference: baseline from Munich's own medians (not a model, not used for predictions) | medians of Munich's `is_test = false` rows | 122.93 | n/a |
 
-Model v2 per city (test rows):
+The three numbers, side by side:
 
-| City | Baseline MAE (EUR) | Model v2 MAE (EUR) | Improvement | Bias (EUR) | Median price (EUR) |
-|---|---|---|---|---|---|
-| Berlin | 63.80 | 46.37 | 27.3% | −27.01 | 128.75 |
-| Vienna | 54.85 | 41.09 | 25.1% | −2.32 | 124.50 |
-| Munich | 122.93 | 106.53 | 13.3% | −49.50 | 220.00 |
+| | MAE (EUR) |
+|---|---|
+| Baseline on Munich | 163.24 (all priced listings), 171.31 (held-out listings) |
+| Model on Berlin + Vienna | 40.39 (v1), 42.94 (v2) |
+| Model on Munich, first run | 149.61 (all priced listings), 156.90 (held-out listings) |
+| Model on Munich, after the changes (v2) | 115.36 (held-out listings) |
 
 ### The gap, explained
 
 - **Features that did not transfer: about 8 EUR.** Removing `city` and the raw coordinates lowers the Munich MAE from 156.90 to 149.18 EUR. It costs about 2.5 EUR in Berlin and Vienna, where coordinates were useful.
 - **Price level: about 34 EUR, the largest step.** One number, Munich's median price (201 EUR against 129 in Berlin and 125 in Vienna), lowers the MAE to 115.36 EUR.
-- **Munich's own price structure: about 9 EUR.** Retraining with Munich's train rows lowers it to 106.53 EUR. The ranking improves from 0.67 to 0.73 (rank correlation).
-- **What remains is not a transfer problem.** After retraining, the Munich error is still 2.4 times the error in Berlin and Vienna. Munich's own baseline shows the same: 122.93 EUR against 58.93 EUR at home. Prices are higher, so the same relative error is more euros, and listings that look alike differ much more in price. The typical listing is off by 61.01 EUR; a few expensive ones pull the MAE up to 106.53 EUR.
-- **Long stays are predicted well** (MAE 16.88 EUR, 23 listings); short stays carry the error (108.60 EUR, 996 listings).
-- **Assumption, not verified:** Oktoberfest pricing during the snapshot would explain both the high level and the wide spread of short-stay prices. Model v2 has learned these prices as normal for Munich.
-- **Cost of the portable model:** v2 is 3.11 EUR worse than v1 on the Berlin + Vienna test set (43.50 against 40.39 EUR).
+- **After the changes Munich is still 2.7 times worse than Berlin and Vienna** (115.36 against 42.94 EUR). The model was not trained on Munich, and a single price level does not capture that Munich prices are spread wider: size and a central location cost more there.
+- **Munich prices are hard to predict even with Munich data.** A baseline built from Munich's own medians has an MAE of 122.93 EUR, against 58.93 EUR for the same baseline at home. Prices are higher, so the same relative error is more euros, and listings that look alike differ much more in price.
+- **Long stays transferred, short stays carry the error** (first run: 45.37 against 152.24 EUR).
+- **Assumption, not verified:** Oktoberfest pricing during the snapshot (23 September) would explain both the high level and the wide spread of short-stay prices.
+- **Cost of the portable model:** v2 is 2.55 EUR worse than v1 on the Berlin + Vienna test set (42.94 against 40.39 EUR).
+
+Model v2 on the held-out listings:
+
+| City | Evaluated on | Listings | Baseline MAE (EUR) | Model v2 MAE (EUR) | Improvement |
+|---|---|---|---|---|---|
+| Berlin + Vienna | test | 3,673 | 58.93 | 42.94 | 27.1% |
+| Munich | held-out listings, not trained on | 1,019 | 171.31 | 115.36 | 32.7% |
+
+Model v2 on Munich in detail (1,019 held-out listings):
+
+- **Still too low on average.** Bias −57.57 EUR (first run: −142.97 EUR on all priced listings). The typical short-stay listing is off by 69.23 EUR.
+- **Ranking unchanged.** Rank correlation of predicted and actual price 0.68 (first run 0.67): the changes fixed the level, not the order.
+- **By room type.** Entire homes: MAE 133.98 EUR against a baseline of 202.11 EUR. Private rooms: 82.30 against 118.35 EUR.
+- **By size.** MAE grows with the number of guests: 84.56 EUR for 1 to 2 guests, 133.63 for 3 to 4, 218.00 for 5 to 6, 206.24 for 7 or more.
+- **One price level does not fit every segment.** Short stays are still under-priced (bias −59.29 EUR), while long stays (23 listings, bias +16.86 EUR) and hotel rooms (9 listings, bias +58.16 EUR, worse than the baseline) are now over-priced. Munich's premium sits in short-stay homes and rooms, not in all listings.
 
 Saved model v2: `/Volumes/workspace/airbnb/models/price_model_v2.joblib`
-sha256: `bce2082ed8f0002f668d87b0c6ea74c147c2885b4519184d8bca83356a675985`
+sha256: `2aaaa2327ae2f1fe972825540ce3754f20b409d2725c30ddf348b42817a6b2ef`
