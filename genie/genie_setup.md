@@ -5,6 +5,7 @@ Created in Databricks under **Genie → New**. Name: *Airbnb prices: Berlin, Vie
 ## 1. Tables
 
 - `workspace.airbnb.gold_listing_features`
+- `workspace.airbnb.gold_baseline_predictions` (baseline price of every listing, written by `baseline/01_baseline`)
 - `workspace.airbnb.gold_city_metrics`
 - `workspace.airbnb.gold_neighbourhood_metrics`
 - `workspace.airbnb.gold_price_predictions`
@@ -37,14 +38,18 @@ Room types
 
 Model and errors
 - Predictions are in gold_price_predictions. Join to gold_listing_features on BOTH city and listing_id.
-- gold_price_predictions has one row per listing and model_version. Always filter on one model_version before joining. If the user does not name a version, use the latest version that exists for that city and say which one you used.
-- Error = predicted_price_eur - price_eur. Below zero means the model UNDER-prices the listing (predicts less than the real price). Above zero means it OVER-prices it.
+- Always filter gold_price_predictions on one model_version. v1 is the model of the first run. v2 is the model after the changes. Both are trained on Berlin and Vienna only. No model is trained on Munich; never say a model was retrained on Munich.
+- If the user does not name a version: use v1 for Berlin and Vienna. For Munich show v1 and v2 side by side on the same held-out listings (see below). Always say which version you used.
+- Error = predicted_price_eur - price_eur. "Under-priced" means predicted_price_eur minus price_eur is below zero. Above zero means over-priced.
 - Errors only make sense on listings the model did not learn from:
-  - berlin and vienna: is_trainable = true AND is_test = true (the held-out test set);
-  - munich: is_trainable = true (every Munich listing is new to the model; ignore is_test).
+  - berlin and vienna: is_trainable = true AND is_test = true (the held-out test set), for every version;
+  - munich, v1: is_trainable = true (all priced listings; v1 used nothing from Munich);
+  - munich, v2: is_trainable = true AND is_test = true ONLY (v2 takes Munich's median price from the other Munich listings).
+- To compare v1 and v2 on Munich, use the same rows for both: munich, is_trainable = true AND is_test = true (1,019 listings). The baseline price of every listing is in gold_baseline_predictions (join on city and listing_id).
 - MAE = mean absolute error in EUR = avg(abs(predicted_price_eur - price_eur)).
 - "Where does the model under-price most" means the average error (bias) per neighbourhood or room type, most negative first. Only show groups with at least 10 evaluated listings.
 - Official model results (MAE of model and baseline per city, room type, stay type) are in gold_model_metrics. Use them when the user asks for "the MAE" or "how good is the model". evaluated_on = 'test' is Berlin and Vienna, 'new_city' is Munich. segment = 'all' is the whole city. The row city = 'berlin+vienna' is both training cities together.
+- In gold_model_metrics the Munich row of v1 covers all 5,076 priced listings and the Munich row of v2 only the 1,019 held-out listings. Do not compare these two rows directly; compute both on the held-out listings instead.
 - The baseline is the median train price for the same room type and number of guests.
 
 Style
@@ -78,7 +83,7 @@ ORDER BY listings DESC
 LIMIT 10
 ```
 
-**Where does the model under-price listings the most?**
+**Where does the model under-price listings the most?** (model v1, the first run)
 
 ```sql
 WITH latest AS (
@@ -99,7 +104,7 @@ ORDER BY avg_error_eur ASC
 LIMIT 10
 ```
 
-**What is the MAE of the model and the baseline in each city?**
+**What is the MAE of the model and the baseline in each city?** (rows of different versions in Munich cover different listings, see the next example)
 
 ```sql
 SELECT model_version, city, evaluated_on, n_listings, mae_baseline_eur, mae_model_eur, improvement_pct, bias_eur
@@ -107,6 +112,25 @@ FROM workspace.airbnb.gold_model_metrics
 WHERE segment = 'all'
 ORDER BY model_version, evaluated_on, city
 ```
+
+**How do v1 and v2 compare in Munich?**
+
+```sql
+WITH m AS (
+  SELECT listing_id, price_eur
+  FROM workspace.airbnb.gold_listing_features
+  WHERE city = 'munich' AND is_trainable AND is_test
+    AND snapshot_date = (SELECT max(snapshot_date) FROM workspace.airbnb.gold_listing_features WHERE city = 'munich')
+)
+SELECT 'baseline' AS predictor, count(*) AS n_listings, round(avg(abs(b.baseline_price_eur - m.price_eur)), 2) AS mae_eur
+FROM m JOIN workspace.airbnb.gold_baseline_predictions b ON b.city = 'munich' AND b.listing_id = m.listing_id
+UNION ALL
+SELECT concat('model ', p.model_version), count(*), round(avg(abs(p.predicted_price_eur - m.price_eur)), 2)
+FROM m JOIN workspace.airbnb.gold_price_predictions p ON p.city = 'munich' AND p.listing_id = m.listing_id
+GROUP BY p.model_version
+```
+
+Expected: baseline 171.31, v1 156.90, v2 115.36 EUR on 1,019 listings.
 
 **Compare Berlin and Vienna**
 
@@ -127,10 +151,11 @@ WHERE room_type = 'All' AND city IN ('berlin', 'vienna')
 - Where does the model under-price listings the most?
 - How much more expensive is Munich than Berlin and Vienna?
 - How good is the model compared with the baseline?
+- How do v1 and v2 compare in Munich?
 
 ## 5. Benchmarks (Configure → Benchmarks)
 
-Add the five questions from section 3 with their SQL as the expected answer, then **Run benchmarks**. All five must pass before the demo. A question that fails is fixed by changing the general instructions, not by rewording the question. Screenshot the benchmark result for the presentation.
+Add the six questions from section 3 with their SQL as the expected answer, then **Run benchmarks**. All six must pass before the demo. A question that fails is fixed by changing the general instructions, not by rewording the question. Screenshot the benchmark result for the presentation.
 
 Extra checks to ask by hand (the answers must follow the rules above):
 
@@ -139,12 +164,13 @@ Extra checks to ask by hand (the answers must follow the rules above):
 | What is the average price in Munich? | uses `is_trainable`, says average, not median |
 | How many listings does City A have? | counts all Berlin listings (12,376), not only priced ones |
 | Which listing is the most over-priced in Vienna? | test rows only, error above zero, largest first |
-| How wrong is the model in Munich? | `new_city` row of `gold_model_metrics`, MAE about 150 EUR, bias negative |
+| How wrong is the model in Munich? | v1: MAE 149.61 EUR on all priced listings, bias negative; and v1 against v2 on the same held-out listings (156.90 against 115.36 EUR) |
+| Was the model retrained on Munich? | No. Both versions are trained on Berlin and Vienna only; v2 uses only Munich's median price |
 
 ## 6. Tricks that made Genie answer correctly (for the presentation slide)
 
 1. Column and table descriptions written by the pipeline: Genie reads them, so "is_trainable", "is_test" and "price_eur" are explained once, in the data, not in a long prompt.
-2. One rule for each mistake Genie made in testing, written as a short instruction: lower-case city names, filtering on `model_version` before the join, the sign of the error, test rows only.
+2. One rule for each mistake Genie made in testing, written as a short instruction: lower-case city names, filtering on one `model_version` before the join, the sign of the error, test rows only, and the same held-out rows when v1 and v2 are compared on Munich (Genie first compared 149.61 with 115.36, which cover different listings).
 3. Trusted example SQL for the three required questions.
 4. Value sampling on `city`, `room_type`, `neighbourhood`, so free text like "entire homes" or "Wien" maps to the stored values.
 5. Benchmarks: the example questions with expected SQL, re-run after every change of the instructions.
